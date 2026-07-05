@@ -1,0 +1,30 @@
+# Секреты
+.env
+.env.local
+
+# Базы данных
+*.db
+*.sqlite
+data/
+/persistent/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Логи
+*.log
+logs/
+
+# Файлы бота (локальные)
+logo.jpg
+examples/*.pdf
