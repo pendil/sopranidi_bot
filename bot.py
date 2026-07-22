@@ -772,6 +772,17 @@ def get_active_promotions():
     return rows
 
 
+def get_all_promotions():
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, name, description, discount, valid_until, is_active, created_at FROM promotions ORDER BY id DESC"
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
 def get_promotion_by_id(promo_id: int):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
@@ -782,10 +793,26 @@ def get_promotion_by_id(promo_id: int):
     return row
 
 
+def activate_promotion(promo_id: int):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("UPDATE promotions SET is_active = 1 WHERE id = ?", (promo_id,))
+    conn.commit()
+    conn.close()
+
+
 def deactivate_promotion(promo_id: int):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute("UPDATE promotions SET is_active = 0 WHERE id = ?", (promo_id,))
+    conn.commit()
+    conn.close()
+
+
+def delete_promotion(promo_id: int):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM promotions WHERE id = ?", (promo_id,))
     conn.commit()
     conn.close()
 
@@ -1021,6 +1048,7 @@ def admin_menu_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="📊 Экспорт заказов", callback_data="admin_export_orders")
     builder.button(text="⭐ Управление отзывами", callback_data="admin_reviews")
     builder.button(text="🛠️ Управление услугами", callback_data="admin_services")
+    builder.button(text="🎉 Управление акциями", callback_data="admin_promotions")
     builder.button(text="🎯 Голосования", callback_data="admin_polls")
     builder.button(text="🏷️ Промокоды", callback_data="admin_promocodes")
     builder.button(text="🗑️ Удалить старые заказы", callback_data="admin_delete_old")
@@ -1227,8 +1255,16 @@ class UserBirthdayState(StatesGroup):
     waiting_for_birthday = State()
 
 
+# ===================== НОВЫЕ СОСТОЯНИЯ ДЛЯ АКЦИЙ =====================
+class AdminPromotionCreateState(StatesGroup):
+    waiting_for_name = State()
+    waiting_for_description = State()
+    waiting_for_discount = State()
+    waiting_for_valid_until = State()
+
+
 # ===================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====================
-async def update_message(callback: CallbackQuery, text: str, reply_markup=None, parse_mode=None):
+async def update_message(callback: CallbackQuery, text: str, reply_markup=None, parse_mode="Markdown"):
     try:
         await callback.message.edit_text(
             text,
@@ -1258,9 +1294,9 @@ async def update_message(callback: CallbackQuery, text: str, reply_markup=None, 
             )
 
 
-async def send_safe_message(message: Message, text: str, reply_markup=None):
+async def send_safe_message(message: Message, text: str, reply_markup=None, parse_mode="Markdown"):
     try:
-        await message.answer(text, reply_markup=reply_markup)
+        await message.answer(text, reply_markup=reply_markup, parse_mode=parse_mode)
     except Exception as e:
         logging.error(f"Ошибка отправки сообщения: {e}")
 
@@ -1403,7 +1439,7 @@ async def cmd_broadcast(message: Message, state: FSMContext):
     failed = 0
     for uid in users:
         try:
-            await bot.send_message(uid[0], text)
+            await bot.send_message(uid[0], text, parse_mode="Markdown")
             sent += 1
             await asyncio.sleep(0.1)
         except Exception as e:
@@ -1414,7 +1450,7 @@ async def cmd_broadcast(message: Message, state: FSMContext):
     await message.answer(f"✅ Рассылка выполнена. Отправлено {sent} пользователям, не доставлено {failed}.")
 
 
-# ===================== АКЦИИ =====================
+# ===================== АКЦИИ (ДЛЯ ПОЛЬЗОВАТЕЛЕЙ) =====================
 @dp.callback_query(F.data == "promotions")
 async def cb_promotions(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -1457,6 +1493,280 @@ async def cb_promotions(callback: CallbackQuery):
     keyboard.adjust(1)
     await update_message(callback, text, keyboard.as_markup())
     await callback.answer()
+
+
+# ===================== АДМИН: УПРАВЛЕНИЕ АКЦИЯМИ =====================
+@dp.callback_query(F.data == "admin_promotions")
+async def cb_admin_promotions(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    promotions = await run_db(get_all_promotions)
+    await run_db(add_admin_log, callback.from_user.id, "view_promotions", "Просмотрел список акций")
+
+    text = "🎉 *Управление акциями*\n\n"
+    if promotions:
+        for promo in promotions:
+            promo_id, name, description, discount, valid_until, is_active, created_at = promo
+            status_icon = "🟢" if is_active else "🔴"
+            valid_date = datetime.fromisoformat(valid_until).strftime("%d.%m.%Y") if valid_until else "∞"
+            text += f"{status_icon} *{name}* - {discount}% (до {valid_date})\n"
+            text += f"   ID: {promo_id}\n"
+    else:
+        text += "Нет созданных акций.\n"
+
+    text += "\nВыберите действие:"
+
+    keyboard = InlineKeyboardBuilder()
+    keyboard.button(text="➕ Создать акцию", callback_data="promotion_create")
+    keyboard.button(text="🔄 Активировать", callback_data="promotion_activate")
+    keyboard.button(text="⏹️ Деактивировать", callback_data="promotion_deactivate")
+    keyboard.button(text="🗑️ Удалить", callback_data="promotion_delete")
+    keyboard.button(text="🔙 Назад", callback_data="admin_menu")
+    keyboard.adjust(1)
+
+    await update_message(callback, text, keyboard.as_markup())
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "promotion_create")
+async def cb_promotion_create(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        "🎉 *Создание акции*\n\n"
+        "Введите *название* акции (например: Новогодняя распродажа):",
+        parse_mode="Markdown",
+        reply_markup=back_to_admin_keyboard()
+    )
+    await state.set_state(AdminPromotionCreateState.waiting_for_name)
+    await callback.answer()
+
+
+@dp.message(AdminPromotionCreateState.waiting_for_name)
+async def process_promotion_name(message: Message, state: FSMContext):
+    if message.text == "/cancel":
+        await state.clear()
+        await message.answer("❌ Создание акции отменено.", reply_markup=admin_menu_keyboard())
+        return
+
+    await state.update_data(name=message.text.strip())
+    await message.answer(
+        "📝 Введите *описание* акции (например: Скидка на все услуги в честь праздника!):",
+        parse_mode="Markdown"
+    )
+    await state.set_state(AdminPromotionCreateState.waiting_for_description)
+
+
+@dp.message(AdminPromotionCreateState.waiting_for_description)
+async def process_promotion_description(message: Message, state: FSMContext):
+    if message.text == "/cancel":
+        await state.clear()
+        await message.answer("❌ Создание акции отменено.", reply_markup=admin_menu_keyboard())
+        return
+
+    await state.update_data(description=message.text.strip())
+    await message.answer(
+        "🎯 Введите размер *скидки* в % (только число, например: 25):",
+        parse_mode="Markdown"
+    )
+    await state.set_state(AdminPromotionCreateState.waiting_for_discount)
+
+
+@dp.message(AdminPromotionCreateState.waiting_for_discount)
+async def process_promotion_discount(message: Message, state: FSMContext):
+    if message.text == "/cancel":
+        await state.clear()
+        await message.answer("❌ Создание акции отменено.", reply_markup=admin_menu_keyboard())
+        return
+
+    try:
+        discount = int(message.text.strip())
+        if discount <= 0 or discount > 100:
+            await message.answer("❌ Скидка должна быть от 1 до 100%. Попробуйте снова:")
+            return
+        await state.update_data(discount=discount)
+        await message.answer(
+            "📅 Введите дату окончания акции в формате *ДД.ММ.ГГГГ*\n"
+            "Пример: 31.12.2026\n\n"
+            "Или отправьте *бесконечно*, чтобы акция действовала без ограничений:",
+            parse_mode="Markdown"
+        )
+        await state.set_state(AdminPromotionCreateState.waiting_for_valid_until)
+    except ValueError:
+        await message.answer("❌ Введите корректное число. Попробуйте снова:")
+
+
+@dp.message(AdminPromotionCreateState.waiting_for_valid_until)
+async def process_promotion_valid_until(message: Message, state: FSMContext):
+    if message.text == "/cancel":
+        await state.clear()
+        await message.answer("❌ Создание акции отменено.", reply_markup=admin_menu_keyboard())
+        return
+
+    valid_until = None
+    if message.text.strip().lower() == "бесконечно":
+        # Бесконечная акция (действует 100 лет)
+        valid_until = (datetime.now() + timedelta(days=365 * 100)).isoformat()
+    else:
+        try:
+            valid_until_dt = datetime.strptime(message.text.strip(), "%d.%m.%Y")
+            if valid_until_dt < datetime.now():
+                await message.answer("❌ Дата должна быть в будущем. Попробуйте снова:")
+                return
+            valid_until = valid_until_dt.isoformat()
+        except ValueError:
+            await message.answer(
+                "❌ Неверный формат. Используйте ДД.ММ.ГГГГ или напишите 'бесконечно'. Попробуйте снова:")
+            return
+
+    data = await state.get_data()
+    promo_id = await run_db(
+        create_promotion,
+        data['name'],
+        data['description'],
+        data['discount'],
+        valid_until
+    )
+
+    await run_db(add_admin_log, message.from_user.id, "create_promotion",
+                 f"Создал акцию {data['name']} ({data['discount']}%)")
+
+    valid_text = "бесконечно" if valid_until == (
+                datetime.now() + timedelta(days=365 * 100)).isoformat() else datetime.fromisoformat(
+        valid_until).strftime("%d.%m.%Y")
+
+    await message.answer(
+        f"✅ *Акция создана!*\n\n"
+        f"📌 Название: *{data['name']}*\n"
+        f"📝 Описание: {data['description']}\n"
+        f"🎯 Скидка: *{data['discount']}%*\n"
+        f"📅 Действует до: *{valid_text}*\n\n"
+        f"Акция автоматически активна и будет применяться к заказам.",
+        parse_mode="Markdown",
+        reply_markup=admin_menu_keyboard()
+    )
+    await state.clear()
+
+
+@dp.callback_query(F.data == "promotion_activate")
+async def cb_promotion_activate(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        "🔄 *Активация акции*\n\n"
+        "Введите ID акции, которую хотите активировать.\n\n"
+        "Чтобы узнать ID, посмотрите список акций выше.\n\n"
+        "Пример: 1",
+        parse_mode="Markdown",
+        reply_markup=back_to_admin_keyboard()
+    )
+
+    # Сохраняем состояние, чтобы знать, что это активация
+    await callback.answer()
+
+
+@dp.message(F.text & ~F.text.startswith("/"))
+async def process_promotion_action(message: Message, state: FSMContext):
+    # Проверяем, является ли пользователь админом
+    if not is_admin(message.from_user.id):
+        return
+
+    # Проверяем, что это число
+    try:
+        promo_id = int(message.text.strip())
+    except ValueError:
+        await message.answer("❌ Введите число (ID акции).")
+        return
+
+    # Проверяем контекст - что хотим сделать с акцией
+    # Используем простое решение: показываем меню для выбранной акции
+    promo = await run_db(get_promotion_by_id, promo_id)
+    if not promo:
+        await message.answer(f"❌ Акция с ID {promo_id} не найдена.")
+        return
+
+    promo_id, name, description, discount, valid_until, is_active = promo
+    status_text = "🟢 активна" if is_active else "🔴 неактивна"
+
+    keyboard = InlineKeyboardBuilder()
+    keyboard.button(text="✅ Активировать", callback_data=f"promotion_do_activate_{promo_id}")
+    keyboard.button(text="⏹️ Деактивировать", callback_data=f"promotion_do_deactivate_{promo_id}")
+    keyboard.button(text="🗑️ Удалить", callback_data=f"promotion_do_delete_{promo_id}")
+    keyboard.button(text="🔙 Назад", callback_data="admin_promotions")
+    keyboard.adjust(1)
+
+    await message.answer(
+        f"📋 *Управление акцией:*\n\n"
+        f"📌 Название: *{name}*\n"
+        f"🎯 Скидка: *{discount}%*\n"
+        f"📊 Статус: {status_text}\n\n"
+        f"Выберите действие:",
+        parse_mode="Markdown",
+        reply_markup=keyboard.as_markup()
+    )
+
+
+@dp.callback_query(F.data.startswith("promotion_do_activate_"))
+async def cb_promotion_do_activate(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    promo_id = int(callback.data.split("_")[3])
+    promo = await run_db(get_promotion_by_id, promo_id)
+    if not promo:
+        await callback.answer("❌ Акция не найдена", show_alert=True)
+        return
+
+    await run_db(activate_promotion, promo_id)
+    await run_db(add_admin_log, callback.from_user.id, "activate_promotion", f"Активировал акцию {promo[1]}")
+
+    await callback.answer("✅ Акция активирована!", show_alert=True)
+    await cb_admin_promotions(callback)
+
+
+@dp.callback_query(F.data.startswith("promotion_do_deactivate_"))
+async def cb_promotion_do_deactivate(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    promo_id = int(callback.data.split("_")[3])
+    promo = await run_db(get_promotion_by_id, promo_id)
+    if not promo:
+        await callback.answer("❌ Акция не найдена", show_alert=True)
+        return
+
+    await run_db(deactivate_promotion, promo_id)
+    await run_db(add_admin_log, callback.from_user.id, "deactivate_promotion", f"Деактивировал акцию {promo[1]}")
+
+    await callback.answer("✅ Акция деактивирована!", show_alert=True)
+    await cb_admin_promotions(callback)
+
+
+@dp.callback_query(F.data.startswith("promotion_do_delete_"))
+async def cb_promotion_do_delete(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    promo_id = int(callback.data.split("_")[3])
+    promo = await run_db(get_promotion_by_id, promo_id)
+    if not promo:
+        await callback.answer("❌ Акция не найдена", show_alert=True)
+        return
+
+    await run_db(delete_promotion, promo_id)
+    await run_db(add_admin_log, callback.from_user.id, "delete_promotion", f"Удалил акцию {promo[1]}")
+
+    await callback.answer("✅ Акция удалена!", show_alert=True)
+    await cb_admin_promotions(callback)
 
 
 # ===================== ПРОСМОТР ОТЗЫВОВ =====================
@@ -2006,7 +2316,7 @@ async def process_poll_expiry(message: Message, state: FSMContext):
     sent = 0
     for uid in users:
         try:
-            await bot.send_message(uid[0], text)
+            await bot.send_message(uid[0], text, parse_mode="Markdown")
             sent += 1
             await asyncio.sleep(0.05)
         except Exception as e:
@@ -2347,7 +2657,8 @@ async def cb_accept_urgent(callback: CallbackQuery):
             f"🔥 *Срочный заказ принят!*\n\n"
             f"Заказ {order[9]}: {order[2]}\n"
             f"Статус: *В работе*\n\n"
-            f"Ваш срочный заказ взят в работу!"
+            f"Ваш срочный заказ взят в работу!",
+            parse_mode="Markdown"
         )
     except Exception as e:
         logging.warning(f"Не удалось уведомить пользователя {order[1]}: {e}")
@@ -2644,7 +2955,7 @@ async def send_order_detail_message(message: Message, order_id: int):
     if admin_note:
         text += f"📌 Заметка: {admin_note}\n"
 
-    await message.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent))
+    await message.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent), parse_mode="Markdown")
 
 
 @dp.callback_query(F.data.startswith("start_work_"))
@@ -2670,7 +2981,8 @@ async def cb_start_work(callback: CallbackQuery):
             f"🔧 *Статус заказа обновлён!*\n\n"
             f"Заказ {order_code}: {order[2]}\n"
             f"Статус: *В работе*\n\n"
-            f"Наша команда уже работает над вашим заказом!"
+            f"Наша команда уже работает над вашим заказом!",
+            parse_mode="Markdown"
         )
     except Exception as e:
         logging.warning(f"Не удалось уведомить пользователя {order[1]}: {e}")
@@ -2700,7 +3012,8 @@ async def cb_complete_work(callback: CallbackQuery):
             f"✅ *Заказ выполнен!*\n\n"
             f"Заказ {order_code}: {order[2]}\n"
             f"Статус: *Выполнен*\n\n"
-            f"Спасибо за ожидание! Вы можете оставить отзыв о нашей работе."
+            f"Спасибо за ожидание! Вы можете оставить отзыв о нашей работе.",
+            parse_mode="Markdown"
         )
     except Exception as e:
         logging.warning(f"Не удалось уведомить пользователя {order[1]}: {e}")
@@ -2732,6 +3045,7 @@ async def cb_delete_order(callback: CallbackQuery):
         f"💰 Цена: {order[3]} руб.\n"
         f"📊 Статус: {order[4]}\n\n"
         f"Это действие невозможно отменить!",
+        parse_mode="Markdown",
         reply_markup=keyboard.as_markup()
     )
     await callback.answer()
@@ -2756,6 +3070,7 @@ async def cb_confirm_delete_order(callback: CallbackQuery):
     await run_db(add_admin_log, callback.from_user.id, "delete_order", f"Удалил заказ {order_code}")
     await callback.message.edit_text(
         f"✅ Заказ {order_code} успешно удалён!",
+        parse_mode="Markdown",
         reply_markup=admin_menu_keyboard()
     )
     await callback.answer()
@@ -2788,7 +3103,8 @@ async def cb_confirm_payment(callback: CallbackQuery):
             f"Заказ {order_code}: {service}\n"
             f"Сумма: {final_price} руб.\n\n"
             f"Спасибо за оплату! Мы свяжемся с вами в ближайшее время.\n"
-            f"Диспетчер: {DISPATCHER_USERNAME}"
+            f"Диспетчер: {DISPATCHER_USERNAME}",
+            parse_mode="Markdown"
         )
     except Exception as e:
         logging.warning(f"Не удалось уведомить пользователя {user_id}: {e}")
@@ -2834,11 +3150,14 @@ async def show_order_detail(target, order_id: int, is_callback: bool = False):
 
     if is_callback:
         try:
-            await target.edit_text(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent))
+            await target.edit_text(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent),
+                                   parse_mode="Markdown")
         except Exception:
-            await target.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent))
+            await target.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent),
+                                parse_mode="Markdown")
     else:
-        await target.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent))
+        await target.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent),
+                            parse_mode="Markdown")
 
 
 # ===================== АДМИН: ПРИКРЕПИТЬ ФАЙЛ =====================
@@ -2856,6 +3175,7 @@ async def cb_attach_file_start(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         f"📎 *Прикрепить файл к заказу {order[9] or f'#{order_id}'}*\n\n"
         f"Отправьте файл (PDF, DOC, DOCX, TXT, ZIP, JPG, PNG):",
+        parse_mode="Markdown",
         reply_markup=back_to_main_keyboard()
     )
     await state.set_state(AttachFileState.waiting_for_file)
@@ -2900,7 +3220,8 @@ async def cb_attach_file_process(message: Message, state: FSMContext):
                 f"📎 *К вашему заказу прикреплён файл!*\n\n"
                 f"Заказ {order_code}: {order[2]}\n"
                 f"Файл: {file_name}\n\n"
-                f"Вы можете скачать его в разделе 'Мои заказы'."
+                f"Вы можете скачать его в разделе 'Мои заказы'.",
+                parse_mode="Markdown"
             )
         except Exception as e:
             logging.warning(f"Не удалось уведомить пользователя {order[1]}: {e}")
@@ -2933,6 +3254,7 @@ async def cb_review_start(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         f"⭐ *Оцените работу над заказом {order[9] or f'#{order_id}'}*\n\n"
         f"Выберите оценку от 1 до 5:",
+        parse_mode="Markdown",
         reply_markup=keyboard.as_markup()
     )
     await state.set_state(ReviewState.waiting_for_rating)
@@ -2946,7 +3268,8 @@ async def cb_review_rating(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         f"⭐ *Оставьте отзыв*\n\n"
         f"Вы выбрали оценку: {rating}/5\n\n"
-        f"Напишите текст отзыва (или отправьте /skip, чтобы пропустить):"
+        f"Напишите текст отзыва (или отправьте /skip, чтобы пропустить):",
+        parse_mode="Markdown"
     )
     await state.set_state(ReviewState.waiting_for_review)
     await callback.answer()
@@ -2974,6 +3297,7 @@ async def cb_review_process(message: Message, state: FSMContext):
         f"⭐ Оценка: {rating}/5\n"
         f"📝 Отзыв: {review_text or 'Без текста'}\n\n"
         f"Мы ценим ваше мнение!",
+        parse_mode="Markdown",
         reply_markup=back_to_main_keyboard()
     )
     await state.clear()
@@ -3012,6 +3336,7 @@ async def cb_cancel_order(callback: CallbackQuery):
     await callback.message.edit_text(
         f"✅ Заказ {order_code} успешно отменён!\n\n"
         f"Если вы передумали, вы можете создать новый заказ.",
+        parse_mode="Markdown",
         reply_markup=back_to_main_keyboard()
     )
     await callback.answer()
@@ -3180,17 +3505,16 @@ async def cb_confirm_order_from_db(callback: CallbackQuery, state: FSMContext):
     promo_discount = 0
     promo_name = ""
     if promotions:
-        # Берём максимальную скидку из активных акций
         for promo in promotions:
             promo_id, name, desc, discount, valid_until = promo
             if discount > promo_discount:
                 promo_discount = discount
                 promo_name = name
 
-    # Применяем скидку по промокоду (она перекрывает акцию, если больше)
+    # Применяем скидку по промокоду
     discount, discount_code = await run_db(get_pending_discount, user_id)
 
-    # Используем максимальную скидку из доступных
+    # Используем максимальную скидку
     final_discount = max(promo_discount, discount)
     final_discount_code = discount_code if discount >= promo_discount else promo_name
 
@@ -3215,7 +3539,6 @@ async def cb_confirm_order_from_db(callback: CallbackQuery, state: FSMContext):
 
     urgent_text = "🔥 *СРОЧНЫЙ ЗАКАЗ!*\n" if is_urgent else ""
 
-    # Формируем строку с ценой (со скидкой или без)
     if final_discount > 0:
         price_line = f"~~{service_price} ₽~~ **{final_price} ₽** *(скидка {final_discount}% по акции {final_discount_code})*\n"
     else:
@@ -3338,7 +3661,7 @@ async def support_send_message(message: Message, state: FSMContext):
     sent_to = 0
     for admin_id in ADMINS:
         try:
-            await bot.send_message(admin_id, text)
+            await bot.send_message(admin_id, text, parse_mode="Markdown")
             sent_to += 1
             if message.photo:
                 file_id = message.photo[-1].file_id
@@ -3410,7 +3733,7 @@ async def cb_main_menu(callback: CallbackQuery):
             await callback.message.delete()
         except Exception:
             pass
-        await callback.message.answer(text, reply_markup=main_menu_keyboard())
+        await callback.message.answer(text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
     else:
         await update_message(callback, text, main_menu_keyboard())
     await callback.answer()
@@ -3505,7 +3828,7 @@ async def broadcast_send(message: Message, state: FSMContext):
     failed = 0
     for uid in users:
         try:
-            await bot.send_message(uid[0], message.text)
+            await bot.send_message(uid[0], message.text, parse_mode="Markdown")
             sent += 1
             await asyncio.sleep(0.1)
         except Exception as e:
