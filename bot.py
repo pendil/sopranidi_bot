@@ -1264,7 +1264,7 @@ class AdminPromotionCreateState(StatesGroup):
 
 
 # ===================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====================
-async def update_message(callback: CallbackQuery, text: str, reply_markup=None, parse_mode="Markdown"):
+async def update_message(callback: CallbackQuery, text: str, reply_markup=None, parse_mode="HTML"):
     try:
         await callback.message.edit_text(
             text,
