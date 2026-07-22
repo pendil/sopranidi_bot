@@ -8,22 +8,34 @@ from pathlib import Path
 from datetime import datetime, timedelta
 import random
 import string
+from io import BytesIO
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
-    Message, CallbackQuery, InlineKeyboardMarkup, FSInputFile
+    Message, CallbackQuery, InlineKeyboardMarkup, FSInputFile, BufferedInputFile
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 # ===================== ЗАГРУЗКА .ENV (ЕСЛИ ЕСТЬ) =====================
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except ImportError:
     pass
+
+# ===================== ДЛЯ ЭКСПОРТА В EXCEL =====================
+try:
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+
+    EXCEL_AVAILABLE = True
+except ImportError:
+    EXCEL_AVAILABLE = False
+    logging.warning("⚠️ openpyxl не установлен. Экспорт в Excel будет недоступен.")
 
 # ===================== ГРЕЧЕСКИЙ АЛФАВИТ =====================
 GREEK_LETTERS = [
@@ -43,9 +55,6 @@ os.makedirs(DATA_DIR, exist_ok=True)
 DB_NAME = f"{DATA_DIR}/shop_bot.db"
 
 # ===================== НАСТРОЙКИ (ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ) =====================
-# ВАЖНО: токен и ID админов теперь берутся из переменных окружения / .env файла.
-# Никогда не храните токен в коде — если он туда попадёт, немедленно отзовите
-# его через @BotFather (/revoke) и выпустите новый.
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError(
@@ -77,10 +86,6 @@ dp = Dispatcher()
 
 # ===================== АСИНХРОННАЯ ОБЁРТКА НАД БЛОКИРУЮЩИМ SQLITE =====================
 async def run_db(func, *args, **kwargs):
-    """
-    Выполняет синхронную функцию работы с БД в отдельном потоке,
-    чтобы не блокировать event loop aiogram при каждом запросе к SQLite.
-    """
     return await asyncio.to_thread(func, *args, **kwargs)
 
 
@@ -89,6 +94,7 @@ def generate_order_code() -> str:
     greek_letter = random.choice(GREEK_LETTERS)
     number = random.randint(1000, 9999)
     return f"{greek_letter}{number}"
+
 
 def generate_unique_order_code() -> str:
     conn = sqlite3.connect(DB_NAME)
@@ -104,17 +110,17 @@ def generate_unique_order_code() -> str:
     conn.close()
     return f"OMEGA{timestamp}"
 
+
 def generate_promo_code() -> str:
-    """Генерирует случайный промокод."""
     letters = string.ascii_uppercase + string.digits
     return ''.join(random.choice(letters) for _ in range(8))
+
 
 # ===================== БАЗА ДАННЫХ =====================
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
 
-    # Таблица пользователей
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -129,7 +135,6 @@ def init_db():
         )
     """)
 
-    # Добавляем недостающие колонки (миграция)
     cur.execute("PRAGMA table_info(users)")
     columns = [col[1] for col in cur.fetchall()]
 
@@ -161,7 +166,6 @@ def init_db():
         cur.execute("ALTER TABLE users ADD COLUMN last_birthday_greet_year TEXT DEFAULT ''")
         logging.info("✅ Добавлена колонка last_birthday_greet_year")
 
-    # Таблица заказов
     cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='orders'")
     table_exists = cur.fetchone()
 
@@ -227,7 +231,6 @@ def init_db():
         """)
         logging.info("✅ Таблица orders создана")
 
-    # Услуги
     cur.execute("""
         CREATE TABLE IF NOT EXISTS services (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -239,7 +242,6 @@ def init_db():
         )
     """)
 
-    # Добавляем стандартные услуги
     cur.execute("SELECT COUNT(*) FROM services")
     if cur.fetchone()[0] == 0:
         default_services = [
@@ -257,7 +259,6 @@ def init_db():
             )
         logging.info("✅ Добавлены стандартные услуги")
 
-    # Голосования
     cur.execute("""
         CREATE TABLE IF NOT EXISTS polls (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -282,7 +283,6 @@ def init_db():
         )
     """)
 
-    # Промокоды
     cur.execute("""
         CREATE TABLE IF NOT EXISTS promocodes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -307,7 +307,18 @@ def init_db():
         )
     """)
 
-    # Логи
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS promotions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            description TEXT,
+            discount INTEGER,
+            valid_until TEXT,
+            is_active INTEGER DEFAULT 1,
+            created_at TEXT
+        )
+    """)
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS user_logs (
             log_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -333,9 +344,11 @@ def init_db():
     conn.close()
     logging.info("✅ База данных проверена/создана!")
 
+
 # ===================== ФУНКЦИИ РАБОТЫ С БАЗОЙ =====================
 def is_admin(user_id: int) -> bool:
     return user_id in ADMINS
+
 
 def add_user(user_id: int, username: str, first_name: str, last_name: str = ""):
     conn = sqlite3.connect(DB_NAME)
@@ -347,6 +360,7 @@ def add_user(user_id: int, username: str, first_name: str, last_name: str = ""):
     conn.commit()
     conn.close()
 
+
 def update_user_action(user_id: int, action: str):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
@@ -356,6 +370,7 @@ def update_user_action(user_id: int, action: str):
     )
     conn.commit()
     conn.close()
+
 
 def add_user_log(user_id: int, action: str, details: str = ""):
     conn = sqlite3.connect(DB_NAME)
@@ -367,6 +382,7 @@ def add_user_log(user_id: int, action: str, details: str = ""):
     conn.commit()
     conn.close()
 
+
 def add_admin_log(admin_id: int, action: str, details: str = ""):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
@@ -376,6 +392,7 @@ def add_admin_log(admin_id: int, action: str, details: str = ""):
     )
     conn.commit()
     conn.close()
+
 
 def get_user(user_id: int):
     conn = sqlite3.connect(DB_NAME)
@@ -388,12 +405,14 @@ def get_user(user_id: int):
     conn.close()
     return row
 
+
 def set_user_birthday(user_id: int, birthday: str):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute("UPDATE users SET birthday = ? WHERE user_id = ?", (birthday, user_id))
     conn.commit()
     conn.close()
+
 
 def add_used_promocode(user_id: int, promo_code: str):
     conn = sqlite3.connect(DB_NAME)
@@ -406,6 +425,7 @@ def add_used_promocode(user_id: int, promo_code: str):
     conn.commit()
     conn.close()
 
+
 def set_pending_discount(user_id: int, discount: int, code: str):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
@@ -415,6 +435,7 @@ def set_pending_discount(user_id: int, discount: int, code: str):
     )
     conn.commit()
     conn.close()
+
 
 def get_pending_discount(user_id: int):
     conn = sqlite3.connect(DB_NAME)
@@ -426,12 +447,14 @@ def get_pending_discount(user_id: int):
         return 0, ""
     return row[0] or 0, row[1] or ""
 
+
 def clear_pending_discount(user_id: int):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute("UPDATE users SET pending_discount = 0, pending_discount_code = '' WHERE user_id = ?", (user_id,))
     conn.commit()
     conn.close()
+
 
 def get_users_with_birthday_today(today_str: str):
     conn = sqlite3.connect(DB_NAME)
@@ -444,12 +467,14 @@ def get_users_with_birthday_today(today_str: str):
     conn.close()
     return rows
 
+
 def mark_birthday_greeted(user_id: int, year: str):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute("UPDATE users SET last_birthday_greet_year = ? WHERE user_id = ?", (year, user_id))
     conn.commit()
     conn.close()
+
 
 def add_order(user_id: int, service: str, price: int, is_urgent: int = 0, discount_applied: int = 0) -> tuple:
     conn = sqlite3.connect(DB_NAME)
@@ -464,6 +489,7 @@ def add_order(user_id: int, service: str, price: int, is_urgent: int = 0, discou
     conn.close()
     return order_id, order_code
 
+
 def update_order_status(order_id: int, status: str):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
@@ -473,6 +499,7 @@ def update_order_status(order_id: int, status: str):
     )
     conn.commit()
     conn.close()
+
 
 def update_order_price(order_id: int, admin_price: int, admin_note: str = ""):
     conn = sqlite3.connect(DB_NAME)
@@ -484,6 +511,7 @@ def update_order_price(order_id: int, admin_price: int, admin_note: str = ""):
     conn.commit()
     conn.close()
 
+
 def update_order_review(order_id: int, rating: int, review: str):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
@@ -493,6 +521,7 @@ def update_order_review(order_id: int, rating: int, review: str):
     )
     conn.commit()
     conn.close()
+
 
 def update_order_file(order_id: int, file_id: str):
     conn = sqlite3.connect(DB_NAME)
@@ -504,12 +533,14 @@ def update_order_file(order_id: int, file_id: str):
     conn.commit()
     conn.close()
 
+
 def delete_order(order_id: int):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute("DELETE FROM orders WHERE order_id = ?", (order_id,))
     conn.commit()
     conn.close()
+
 
 def delete_old_orders(days: int = 30):
     conn = sqlite3.connect(DB_NAME)
@@ -524,6 +555,7 @@ def delete_old_orders(days: int = 30):
     conn.close()
     return deleted_count
 
+
 def get_order(order_id: int):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
@@ -535,6 +567,7 @@ def get_order(order_id: int):
     conn.close()
     return row
 
+
 def get_user_orders(user_id: int):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
@@ -545,6 +578,7 @@ def get_user_orders(user_id: int):
     rows = cur.fetchall()
     conn.close()
     return rows
+
 
 def get_all_orders():
     conn = sqlite3.connect(DB_NAME)
@@ -558,6 +592,7 @@ def get_all_orders():
     rows = cur.fetchall()
     conn.close()
     return rows
+
 
 def get_user_stats(user_id: int):
     conn = sqlite3.connect(DB_NAME)
@@ -578,13 +613,16 @@ def get_user_stats(user_id: int):
         "total_spent": total_spent
     }
 
+
 def get_all_users():
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
-    cur.execute("SELECT user_id, username, first_name, last_name, reg_date, last_action, action_date, birthday FROM users ORDER BY reg_date DESC")
+    cur.execute(
+        "SELECT user_id, username, first_name, last_name, reg_date, last_action, action_date, birthday FROM users ORDER BY reg_date DESC")
     rows = cur.fetchall()
     conn.close()
     return rows
+
 
 def get_all_reviews():
     conn = sqlite3.connect(DB_NAME)
@@ -600,6 +638,7 @@ def get_all_reviews():
     conn.close()
     return rows
 
+
 def get_user_logs(user_id: int, limit: int = 20):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
@@ -610,6 +649,7 @@ def get_user_logs(user_id: int, limit: int = 20):
     rows = cur.fetchall()
     conn.close()
     return rows
+
 
 def get_stats():
     conn = sqlite3.connect(DB_NAME)
@@ -642,6 +682,7 @@ def get_stats():
         "avg_rating": round(avg_rating, 1)
     }
 
+
 # ===================== УПРАВЛЕНИЕ УСЛУГАМИ =====================
 def get_all_services():
     conn = sqlite3.connect(DB_NAME)
@@ -651,6 +692,7 @@ def get_all_services():
     conn.close()
     return rows
 
+
 def get_service(service_id: int):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
@@ -658,6 +700,7 @@ def get_service(service_id: int):
     row = cur.fetchone()
     conn.close()
     return row
+
 
 def add_service(name: str, description: str, price: int):
     conn = sqlite3.connect(DB_NAME)
@@ -671,6 +714,7 @@ def add_service(name: str, description: str, price: int):
     conn.close()
     return service_id
 
+
 def update_service(service_id: int, name: str, description: str, price: int, is_active: int):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
@@ -681,12 +725,14 @@ def update_service(service_id: int, name: str, description: str, price: int, is_
     conn.commit()
     conn.close()
 
+
 def delete_service(service_id: int):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute("DELETE FROM services WHERE id = ?", (service_id,))
     conn.commit()
     conn.close()
+
 
 def get_services_keyboard(services: list) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -698,6 +744,51 @@ def get_services_keyboard(services: list) -> InlineKeyboardMarkup:
     builder.button(text="🔙 Назад", callback_data="admin_menu")
     builder.adjust(1)
     return builder.as_markup()
+
+
+# ===================== УПРАВЛЕНИЕ АКЦИЯМИ =====================
+def create_promotion(name: str, description: str, discount: int, valid_until: str):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO promotions (name, description, discount, valid_until, created_at) VALUES (?, ?, ?, ?, ?)",
+        (name, description, discount, valid_until, datetime.now().isoformat())
+    )
+    promo_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return promo_id
+
+
+def get_active_promotions():
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, name, description, discount, valid_until FROM promotions WHERE is_active = 1 AND valid_until > ? ORDER BY id DESC",
+        (datetime.now().isoformat(),)
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def get_promotion_by_id(promo_id: int):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("SELECT id, name, description, discount, valid_until, is_active FROM promotions WHERE id = ?",
+                (promo_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def deactivate_promotion(promo_id: int):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("UPDATE promotions SET is_active = 0 WHERE id = ?", (promo_id,))
+    conn.commit()
+    conn.close()
+
 
 # ===================== ПРОМОКОДЫ =====================
 def create_promocode(code: str, discount: int, valid_until: str, max_uses: int, admin_id: int):
@@ -712,6 +803,7 @@ def create_promocode(code: str, discount: int, valid_until: str, max_uses: int, 
     conn.close()
     return promo_id
 
+
 def get_promocode(code: str):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
@@ -719,6 +811,7 @@ def get_promocode(code: str):
     row = cur.fetchone()
     conn.close()
     return row
+
 
 def use_promocode(promo_id: int, user_id: int):
     conn = sqlite3.connect(DB_NAME)
@@ -731,6 +824,7 @@ def use_promocode(promo_id: int, user_id: int):
     conn.commit()
     conn.close()
 
+
 def get_all_promocodes():
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
@@ -739,12 +833,14 @@ def get_all_promocodes():
     conn.close()
     return rows
 
+
 def delete_promocode(promo_id: int):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute("DELETE FROM promocodes WHERE id = ?", (promo_id,))
     conn.commit()
     conn.close()
+
 
 # ===================== ГОЛОСОВАНИЯ =====================
 def create_poll(question: str, options: list, created_by: int, expires_in_hours: int = 24):
@@ -761,13 +857,16 @@ def create_poll(question: str, options: list, created_by: int, expires_in_hours:
     conn.close()
     return poll_id
 
+
 def get_poll(poll_id: int):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
-    cur.execute("SELECT id, question, options, created_by, created_at, expires_at, is_active FROM polls WHERE id = ?", (poll_id,))
+    cur.execute("SELECT id, question, options, created_by, created_at, expires_at, is_active FROM polls WHERE id = ?",
+                (poll_id,))
     row = cur.fetchone()
     conn.close()
     return row
+
 
 def get_all_polls():
     conn = sqlite3.connect(DB_NAME)
@@ -776,6 +875,7 @@ def get_all_polls():
     rows = cur.fetchall()
     conn.close()
     return rows
+
 
 def vote_poll(poll_id: int, user_id: int, option: str):
     conn = sqlite3.connect(DB_NAME)
@@ -792,6 +892,7 @@ def vote_poll(poll_id: int, user_id: int, option: str):
     conn.close()
     return True
 
+
 def get_poll_results(poll_id: int):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
@@ -799,6 +900,7 @@ def get_poll_results(poll_id: int):
     rows = cur.fetchall()
     conn.close()
     return rows
+
 
 def get_poll_user_vote(poll_id: int, user_id: int):
     conn = sqlite3.connect(DB_NAME)
@@ -808,12 +910,14 @@ def get_poll_user_vote(poll_id: int, user_id: int):
     conn.close()
     return row[0] if row else None
 
+
 def close_poll(poll_id: int):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute("UPDATE polls SET is_active = 0 WHERE id = ?", (poll_id,))
     conn.commit()
     conn.close()
+
 
 def get_expired_active_polls():
     conn = sqlite3.connect(DB_NAME)
@@ -826,10 +930,79 @@ def get_expired_active_polls():
     conn.close()
     return rows
 
+
+# ===================== ЭКСПОРТ ЗАКАЗОВ В EXCEL =====================
+def export_orders_to_excel():
+    if not EXCEL_AVAILABLE:
+        return None
+
+    orders = get_all_orders()
+    if not orders:
+        return None
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Заказы"
+
+    headers = [
+        "ID", "Код заказа", "Пользователь", "Услуга", "Цена",
+        "Статус", "Дата создания", "Дата оплаты", "Оценка", "Отзыв", "Срочный"
+    ]
+
+    header_font = Font(bold=True, size=11, color="FFFFFF")
+    header_fill = PatternFill(start_color="2C3E50", end_color="2C3E50", fill_type="solid")
+    header_alignment = Alignment(horizontal="center", vertical="center")
+
+    for col, header in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = header_alignment
+
+    for row_idx, order in enumerate(orders, 2):
+        order_id, user_id, username, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, is_urgent = order
+        final_price = admin_price if admin_price > 0 else price
+        status_text = {
+            "pending": "Ожидает оплаты",
+            "paid": "Оплачен",
+            "in_progress": "В работе",
+            "cancelled": "Отменён"
+        }.get(status, status)
+
+        ws.cell(row=row_idx, column=1, value=order_id)
+        ws.cell(row=row_idx, column=2, value=order_code or f"#{order_id}")
+        ws.cell(row=row_idx, column=3, value=username or f"ID:{user_id}")
+        ws.cell(row=row_idx, column=4, value=service)
+        ws.cell(row=row_idx, column=5, value=final_price)
+        ws.cell(row=row_idx, column=6, value=status_text)
+        ws.cell(row=row_idx, column=7, value=created_at[:10] if created_at else "")
+        ws.cell(row=row_idx, column=8, value=paid_at[:10] if paid_at else "")
+        ws.cell(row=row_idx, column=9, value=rating if rating > 0 else "")
+        ws.cell(row=row_idx, column=10, value=(review[:100] + "..." if len(review) > 100 else review) if review else "")
+        ws.cell(row=row_idx, column=11, value="Да" if is_urgent else "Нет")
+
+    for col in range(1, len(headers) + 1):
+        max_length = 0
+        col_letter = openpyxl.utils.get_column_letter(col)
+        for row in range(1, ws.max_row + 1):
+            cell_value = ws.cell(row=row, column=col).value
+            if cell_value:
+                max_length = max(max_length, len(str(cell_value)))
+        ws.column_dimensions[col_letter].width = min(max(max_length + 2, 12), 50)
+
+    ws.freeze_panes = "A2"
+
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output
+
+
 # ===================== КЛАВИАТУРЫ =====================
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="📚 Заказать работу", callback_data="buy")
+    builder.button(text="🎉 Акции", callback_data="promotions")
     builder.button(text="📂 Примеры работ", callback_data="examples")
     builder.button(text="📞 Поддержка", callback_data="support")
     builder.button(text="📋 Мои заказы", callback_data="my_orders")
@@ -839,11 +1012,13 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     builder.adjust(2, 2, 2, 1)
     return builder.as_markup()
 
+
 def admin_menu_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="📊 Статистика", callback_data="admin_stats")
     builder.button(text="👥 Пользователи", callback_data="admin_users")
     builder.button(text="📦 Заказы", callback_data="admin_orders")
+    builder.button(text="📊 Экспорт заказов", callback_data="admin_export_orders")
     builder.button(text="⭐ Управление отзывами", callback_data="admin_reviews")
     builder.button(text="🛠️ Управление услугами", callback_data="admin_services")
     builder.button(text="🎯 Голосования", callback_data="admin_polls")
@@ -853,6 +1028,7 @@ def admin_menu_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="🔙 В главное меню", callback_data="main_menu")
     builder.adjust(2, 2, 2, 1)
     return builder.as_markup()
+
 
 def services_keyboard_from_db(services: list) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -864,6 +1040,7 @@ def services_keyboard_from_db(services: list) -> InlineKeyboardMarkup:
     builder.adjust(1)
     return builder.as_markup()
 
+
 def service_edit_keyboard(service_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="✏️ Редактировать", callback_data=f"service_edit_form_{service_id}")
@@ -873,10 +1050,18 @@ def service_edit_keyboard(service_id: int) -> InlineKeyboardMarkup:
     builder.adjust(1)
     return builder.as_markup()
 
+
 def back_to_admin_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="🔙 Назад", callback_data="admin_menu")
     return builder.as_markup()
+
+
+def back_to_main_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔙 В главное меню", callback_data="main_menu")
+    return builder.as_markup()
+
 
 # ===================== ОСТАЛЬНЫЕ КЛАВИАТУРЫ =====================
 def users_keyboard(users: list, page: int = 0) -> InlineKeyboardMarkup:
@@ -890,14 +1075,15 @@ def users_keyboard(users: list, page: int = 0) -> InlineKeyboardMarkup:
         builder.button(text=f"👤 {name[:15]}", callback_data=f"user_{user_id}")
     nav_buttons = []
     if page > 0:
-        nav_buttons.append(("◀️ Назад", f"users_page_{page-1}"))
+        nav_buttons.append(("◀️ Назад", f"users_page_{page - 1}"))
     if end < len(users):
-        nav_buttons.append(("Вперед ▶️", f"users_page_{page+1}"))
+        nav_buttons.append(("Вперед ▶️", f"users_page_{page + 1}"))
     for text, data in nav_buttons:
         builder.button(text=text, callback_data=data)
     builder.button(text="🔙 Назад", callback_data="admin_menu")
     builder.adjust(1)
     return builder.as_markup()
+
 
 def orders_keyboard(orders: list, page: int = 0) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -918,14 +1104,15 @@ def orders_keyboard(orders: list, page: int = 0) -> InlineKeyboardMarkup:
         )
     nav_buttons = []
     if page > 0:
-        nav_buttons.append(("◀️ Назад", f"orders_page_{page-1}"))
+        nav_buttons.append(("◀️ Назад", f"orders_page_{page - 1}"))
     if end < len(orders):
-        nav_buttons.append(("Вперед ▶️", f"orders_page_{page+1}"))
+        nav_buttons.append(("Вперед ▶️", f"orders_page_{page + 1}"))
     for text, data in nav_buttons:
         builder.button(text=text, callback_data=data)
     builder.button(text="🔙 Назад", callback_data="admin_menu")
     builder.adjust(1)
     return builder.as_markup()
+
 
 def order_detail_keyboard(order_id: int, status: str, is_urgent: int = 0) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -946,6 +1133,7 @@ def order_detail_keyboard(order_id: int, status: str, is_urgent: int = 0) -> Inl
     builder.adjust(1)
     return builder.as_markup()
 
+
 def order_user_keyboard(order_id: int, status: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     if status == "pending":
@@ -956,6 +1144,7 @@ def order_user_keyboard(order_id: int, status: str) -> InlineKeyboardMarkup:
     builder.button(text="🔙 Назад", callback_data="my_orders")
     builder.adjust(1)
     return builder.as_markup()
+
 
 def reviews_keyboard(reviews: list, page: int = 0) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -969,66 +1158,74 @@ def reviews_keyboard(reviews: list, page: int = 0) -> InlineKeyboardMarkup:
         builder.button(text=display_text, callback_data=f"review_detail_{order_code}")
     nav_buttons = []
     if page > 0:
-        nav_buttons.append(("◀️ Назад", f"reviews_page_{page-1}"))
+        nav_buttons.append(("◀️ Назад", f"reviews_page_{page - 1}"))
     if end < len(reviews):
-        nav_buttons.append(("Вперед ▶️", f"reviews_page_{page+1}"))
+        nav_buttons.append(("Вперед ▶️", f"reviews_page_{page + 1}"))
     for text, data in nav_buttons:
         builder.button(text=text, callback_data=data)
     builder.button(text="🔙 Назад", callback_data="admin_menu")
     builder.adjust(1)
     return builder.as_markup()
 
-def back_to_main_keyboard() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🔙 В главное меню", callback_data="main_menu")
-    return builder.as_markup()
 
 # ===================== МАШИНЫ СОСТОЯНИЙ =====================
 class SupportState(StatesGroup):
     waiting_for_message = State()
 
+
 class AdminBroadcastState(StatesGroup):
     waiting_for_message = State()
+
 
 class AdminSetPriceState(StatesGroup):
     waiting_for_price = State()
     waiting_for_note = State()
 
+
 class AdminDeleteOldState(StatesGroup):
     waiting_for_days = State()
+
 
 class ReviewState(StatesGroup):
     waiting_for_rating = State()
     waiting_for_review = State()
 
+
 class AttachFileState(StatesGroup):
     waiting_for_file = State()
+
 
 class AdminServiceAddState(StatesGroup):
     waiting_for_name = State()
     waiting_for_description = State()
     waiting_for_price = State()
 
+
 class AdminServiceEditState(StatesGroup):
     waiting_for_name = State()
     waiting_for_description = State()
     waiting_for_price = State()
+
 
 class AdminPollCreateState(StatesGroup):
     waiting_for_question = State()
     waiting_for_options = State()
     waiting_for_expiry = State()
 
+
 class AdminPromocodeCreateState(StatesGroup):
     waiting_for_discount = State()
     waiting_for_valid_until = State()
     waiting_for_max_uses = State()
 
+
 class UserPromocodeState(StatesGroup):
     waiting_for_code = State()
 
+
 class UserBirthdayState(StatesGroup):
     waiting_for_birthday = State()
+
 
 # ===================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====================
 async def update_message(callback: CallbackQuery, text: str, reply_markup=None, parse_mode=None):
@@ -1041,7 +1238,6 @@ async def update_message(callback: CallbackQuery, text: str, reply_markup=None, 
     except Exception as e:
         err = str(e)
         if "message is not modified" in err:
-            # Текст не изменился - ничего страшного, просто игнорируем.
             return
         if "there is no text" in err:
             try:
@@ -1061,11 +1257,13 @@ async def update_message(callback: CallbackQuery, text: str, reply_markup=None, 
                 parse_mode=parse_mode
             )
 
+
 async def send_safe_message(message: Message, text: str, reply_markup=None):
     try:
         await message.answer(text, reply_markup=reply_markup)
     except Exception as e:
         logging.error(f"Ошибка отправки сообщения: {e}")
+
 
 # ===================== ОБРАБОТЧИКИ КОМАНД =====================
 @dp.message(Command("start"))
@@ -1075,12 +1273,19 @@ async def cmd_start(message: Message):
     await run_db(update_user_action, user.id, "start")
     await run_db(add_user_log, user.id, "start", "Запустил бота")
 
-    name = user.first_name or "Друг"
+    name = user.first_name or "Клиент"
     text = (
-        f"🎵 Добро пожаловать в Sopranidi Corporation, {name}!\n\n"
-        "Мы - команда профессионалов, помогающая студентам и школьникам "
-        "создавать уникальные проекты, курсовые и отчёты.\n\n"
-        "Выберите нужную услугу в меню ниже 👇"
+        f"🏛️ *Sopranidi Corporation*\n\n"
+        f"Уважаемый(ая) {name}, приветствуем вас в официальном сервисе "
+        f"академических и деловых проектов.\n\n"
+        f"Мы — команда экспертов с многолетним опытом создания уникальных "
+        f"исследовательских работ, проектов и презентаций высочайшего качества.\n\n"
+        f"🔐 *Важная информация:*\n"
+        f"• Каждый готовый продукт абсолютно индивидуален и создаётся под ваш запрос\n"
+        f"• Все работы хранятся в децентрализованном дата-центре, гарантирующем "
+        f"полную конфиденциальность и недоступность для третьих лиц\n"
+        f"• Мы соблюдаем все стандарты академической этики и оригинальности\n\n"
+        f"Выберите необходимый сервис в меню ниже 👇"
     )
     if LOGO_PATH.exists():
         try:
@@ -1091,21 +1296,23 @@ async def cmd_start(message: Message):
             logging.warning(f"Не удалось отправить логотип: {e}")
     await send_safe_message(message, text, main_menu_keyboard())
 
+
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
     text = (
-        "📖 Помощь\n\n"
-        "/start - главное меню\n"
-        "/buy - выбор услуги\n"
-        "/examples - примеры работ\n"
-        "/support - поддержка\n"
-        "/my_orders - мои заказы\n"
-        "/profile - мой профиль\n"
-        "/set_birthday - указать дату рождения\n\n"
+        "📖 *Помощь*\n\n"
+        "/start - Главное меню\n"
+        "/buy - Выбор услуги\n"
+        "/examples - Примеры работ\n"
+        "/support - Поддержка\n"
+        "/my_orders - Мои заказы\n"
+        "/profile - Мой профиль\n"
+        "/set_birthday - Указать дату рождения\n\n"
         "Для администраторов:\n"
-        "/admin - админ-панель"
+        "/admin - Админ-панель"
     )
-    await send_safe_message(message, text)
+    await send_safe_message(message, text, back_to_main_keyboard())
+
 
 @dp.message(Command("set_birthday"))
 async def cmd_set_birthday(message: Message, state: FSMContext):
@@ -1115,6 +1322,7 @@ async def cmd_set_birthday(message: Message, state: FSMContext):
         parse_mode="Markdown"
     )
     await state.set_state(UserBirthdayState.waiting_for_birthday)
+
 
 @dp.message(UserBirthdayState.waiting_for_birthday)
 async def process_birthday(message: Message, state: FSMContext):
@@ -1134,6 +1342,7 @@ async def process_birthday(message: Message, state: FSMContext):
             "❌ Неверный формат. Введите дату в формате *ДД.ММ* (например, 15.05)",
             parse_mode="Markdown"
         )
+
 
 @dp.message(Command("admin"))
 async def cmd_admin(message: Message):
@@ -1158,6 +1367,7 @@ async def cmd_admin(message: Message):
     )
     await send_safe_message(message, text, admin_menu_keyboard())
 
+
 @dp.message(Command("stats"))
 async def cmd_stats(message: Message):
     if not is_admin(message.from_user.id):
@@ -1176,6 +1386,7 @@ async def cmd_stats(message: Message):
         f"⭐ Средняя оценка: *{stats['avg_rating']}*"
     )
     await message.answer(text)
+
 
 @dp.message(Command("broadcast"))
 async def cmd_broadcast(message: Message, state: FSMContext):
@@ -1198,8 +1409,55 @@ async def cmd_broadcast(message: Message, state: FSMContext):
         except Exception as e:
             failed += 1
             logging.debug(f"Не удалось отправить рассылку {uid[0]}: {e}")
-    await run_db(add_admin_log, message.from_user.id, "broadcast", f"Отправил рассылку {sent} пользователям ({failed} неудачно)")
+    await run_db(add_admin_log, message.from_user.id, "broadcast",
+                 f"Отправил рассылку {sent} пользователям ({failed} неудачно)")
     await message.answer(f"✅ Рассылка выполнена. Отправлено {sent} пользователям, не доставлено {failed}.")
+
+
+# ===================== АКЦИИ =====================
+@dp.callback_query(F.data == "promotions")
+async def cb_promotions(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    await run_db(update_user_action, user_id, "promotions")
+    await run_db(add_user_log, user_id, "promotions", "Просмотрел акции")
+
+    promotions = await run_db(get_active_promotions)
+
+    if not promotions:
+        text = (
+            "🎉 *Акции и спецпредложения*\n\n"
+            "На данный момент активных акций нет.\n"
+            "Подпишитесь на наш канал, чтобы первыми узнавать о новых предложениях!\n\n"
+            f"📢 {CHANNEL_LINK}"
+        )
+        keyboard = InlineKeyboardBuilder()
+        keyboard.button(text="📢 Перейти в канал", url=CHANNEL_LINK)
+        keyboard.button(text="🔙 Назад", callback_data="main_menu")
+        keyboard.adjust(1)
+        await update_message(callback, text, keyboard.as_markup())
+        await callback.answer()
+        return
+
+    text = "🎉 *Активные акции и спецпредложения*\n\n"
+    text += "🔐 Все акции автоматически применяются при оформлении заказа.\n\n"
+
+    for promo in promotions:
+        promo_id, name, description, discount, valid_until = promo
+        valid_date = datetime.fromisoformat(valid_until).strftime("%d.%m.%Y")
+        text += f"🏷️ *{name}*\n"
+        text += f"📝 {description}\n"
+        text += f"🎯 Скидка: *{discount}%*\n"
+        text += f"📅 Действует до: {valid_date}\n\n"
+
+    text += "📌 *Как получить скидку:*\n"
+    text += "Просто оформите заказ — скидка применится автоматически!"
+
+    keyboard = InlineKeyboardBuilder()
+    keyboard.button(text="🔙 Назад", callback_data="main_menu")
+    keyboard.adjust(1)
+    await update_message(callback, text, keyboard.as_markup())
+    await callback.answer()
+
 
 # ===================== ПРОСМОТР ОТЗЫВОВ =====================
 @dp.callback_query(F.data == "view_reviews")
@@ -1229,6 +1487,7 @@ async def cb_view_reviews(callback: CallbackQuery):
         text += f"📌 *Показано 10 из {len(reviews)} отзывов*"
     await update_message(callback, text, back_to_main_keyboard())
     await callback.answer()
+
 
 # ===================== ПРОФИЛЬ =====================
 @dp.callback_query(F.data == "profile")
@@ -1282,6 +1541,7 @@ async def cb_profile(callback: CallbackQuery):
     await update_message(callback, text, keyboard.as_markup())
     await callback.answer()
 
+
 @dp.callback_query(F.data == "set_birthday")
 async def cb_set_birthday(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
@@ -1293,6 +1553,7 @@ async def cb_set_birthday(callback: CallbackQuery, state: FSMContext):
     await state.set_state(UserBirthdayState.waiting_for_birthday)
     await callback.answer()
 
+
 @dp.callback_query(F.data == "apply_promocode")
 async def cb_apply_promocode(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
@@ -1302,6 +1563,7 @@ async def cb_apply_promocode(callback: CallbackQuery, state: FSMContext):
     )
     await state.set_state(UserPromocodeState.waiting_for_code)
     await callback.answer()
+
 
 @dp.message(UserPromocodeState.waiting_for_code)
 async def process_promocode(message: Message, state: FSMContext):
@@ -1341,6 +1603,7 @@ async def process_promocode(message: Message, state: FSMContext):
     )
     await state.clear()
 
+
 # ===================== О КОМПАНИИ =====================
 @dp.callback_query(F.data == "about")
 async def cb_about(callback: CallbackQuery):
@@ -1348,19 +1611,22 @@ async def cb_about(callback: CallbackQuery):
     await run_db(update_user_action, user_id, "about")
     await run_db(add_user_log, user_id, "about", "Открыл информацию о компании")
     text = (
-        "ℹ️ *О компании Sopranidi Corporation*\n\n"
-        "Sopranidi Corp. — это команда профессионалов, которая помогает "
-        "студентам и школьникам создавать уникальные проекты, курсовые и отчёты. "
-        "Мы работаем с 2023 года и за это время помогли более 500 клиентам.\n\n"
-        "🌟 *Наши преимущества:*\n"
-        "• Индивидуальный подход к каждому клиенту\n"
-        "• Гарантия качества и оригинальности\n"
-        "• Соблюдение сроков\n"
-        "• Доступные цены\n\n"
+        "🏛️ *Sopranidi Corporation — Ваш надёжный партнёр*\n\n"
+        "Sopranidi Corp. — это экосистема профессиональных решений для студентов, "
+        "аспирантов и специалистов. Мы создаём уникальные академические и деловые "
+        "проекты с 2023 года, заслужив доверие более 500 клиентов.\n\n"
+        "🔒 *Наши стандарты качества:*\n"
+        "• Каждый проект разрабатывается индивидуально под ваши требования\n"
+        "• Гарантируем 100% оригинальность и соответствие академическим стандартам\n"
+        "• Все работы шифруются и хранятся в децентрализованных дата-центрах\n"
+        "• Строгое соблюдение сроков и конфиденциальность данных\n\n"
+        "📊 *Технологическая безопасность:*\n"
+        "Ваши проекты защищены многоуровневой системой шифрования. "
+        "Доступ к данным имеют только авторизованные сотрудники.\n\n"
         "📌 *Контакты:*\n"
         f"👤 Диспетчер: {DISPATCHER_USERNAME}\n"
         f"👤 CEO: {CEO_USERNAME}\n\n"
-        "🔗 *Ссылки:*\n"
+        "🔗 *Официальные ресурсы:*\n"
         f"📢 Канал: {CHANNEL_LINK}\n"
         f"🤖 Бот: {BOT_LINK}\n"
     )
@@ -1375,6 +1641,7 @@ async def cb_about(callback: CallbackQuery):
     keyboard.adjust(1)
     await update_message(callback, text, keyboard.as_markup())
     await callback.answer()
+
 
 # ===================== АДМИН-ПАНЕЛЬ =====================
 @dp.callback_query(F.data == "admin_stats")
@@ -1398,6 +1665,52 @@ async def cb_admin_stats(callback: CallbackQuery):
     await update_message(callback, text, admin_menu_keyboard())
     await callback.answer()
 
+
+@dp.callback_query(F.data == "admin_export_orders")
+async def cb_admin_export_orders(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    if not EXCEL_AVAILABLE:
+        await callback.answer("❌ Библиотека openpyxl не установлена.", show_alert=True)
+        return
+
+    await callback.answer("⏳ Формируем отчёт...")
+
+    try:
+        excel_file = await run_db(export_orders_to_excel)
+
+        if not excel_file:
+            await update_message(
+                callback,
+                "📊 *Экспорт заказов*\n\nНет заказов для экспорта.",
+                admin_menu_keyboard()
+            )
+            await callback.answer()
+            return
+
+        file_name = f"заказы_{datetime.now().strftime('%d.%m.%Y')}.xlsx"
+        await callback.message.answer_document(
+            document=BufferedInputFile(excel_file.getvalue(), filename=file_name),
+            caption=f"📊 *Отчёт по заказам*\n\n"
+                    f"📅 Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
+                    f"📦 Всего заказов: экспортировано\n\n"
+                    f"🔐 Данные защищены и хранятся в децентрализованной системе.",
+            parse_mode="Markdown"
+        )
+
+        await update_message(
+            callback,
+            "✅ Отчёт успешно сформирован и отправлен!",
+            admin_menu_keyboard()
+        )
+        await callback.answer()
+    except Exception as e:
+        logging.error(f"Ошибка экспорта: {e}")
+        await callback.answer("❌ Ошибка при формировании отчёта", show_alert=True)
+
+
 # ===================== АДМИН: УПРАВЛЕНИЕ УСЛУГАМИ =====================
 @dp.callback_query(F.data == "admin_services")
 async def cb_admin_services(callback: CallbackQuery):
@@ -1409,6 +1722,7 @@ async def cb_admin_services(callback: CallbackQuery):
     text = "🛠️ *Управление услугами*\n\nВыберите услугу для редактирования или добавьте новую:"
     await update_message(callback, text, get_services_keyboard(services))
     await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("service_edit_") & ~F.data.startswith("service_edit_form_"))
 async def cb_service_edit(callback: CallbackQuery):
@@ -1438,6 +1752,7 @@ async def cb_service_edit(callback: CallbackQuery):
     await update_message(callback, text, service_edit_keyboard(service_id))
     await callback.answer()
 
+
 @dp.callback_query(F.data.startswith("service_edit_form_"))
 async def cb_service_edit_form_start(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
@@ -1463,6 +1778,7 @@ async def cb_service_edit_form_start(callback: CallbackQuery, state: FSMContext)
     await state.set_state(AdminServiceEditState.waiting_for_name)
     await callback.answer()
 
+
 @dp.message(AdminServiceEditState.waiting_for_name)
 async def process_service_edit_name(message: Message, state: FSMContext):
     if message.text.strip() != "/skip":
@@ -1470,12 +1786,14 @@ async def process_service_edit_name(message: Message, state: FSMContext):
     await message.answer("📝 Введите новое описание (или /skip, чтобы оставить прежним):")
     await state.set_state(AdminServiceEditState.waiting_for_description)
 
+
 @dp.message(AdminServiceEditState.waiting_for_description)
 async def process_service_edit_description(message: Message, state: FSMContext):
     if message.text.strip() != "/skip":
         await state.update_data(new_description=message.text.strip())
     await message.answer("💰 Введите новую цену числом (или /skip, чтобы оставить прежней):")
     await state.set_state(AdminServiceEditState.waiting_for_price)
+
 
 @dp.message(AdminServiceEditState.waiting_for_price)
 async def process_service_edit_price(message: Message, state: FSMContext):
@@ -1512,6 +1830,7 @@ async def process_service_edit_price(message: Message, state: FSMContext):
     )
     await state.clear()
 
+
 @dp.callback_query(F.data.startswith("service_toggle_"))
 async def cb_service_toggle(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -1525,9 +1844,11 @@ async def cb_service_toggle(callback: CallbackQuery):
     _, name, description, price, is_active = service
     new_status = 0 if is_active else 1
     await run_db(update_service, service_id, name, description, price, new_status)
-    await run_db(add_admin_log, callback.from_user.id, "toggle_service", f"{'Активировал' if new_status else 'Деактивировал'} услугу {name}")
+    await run_db(add_admin_log, callback.from_user.id, "toggle_service",
+                 f"{'Активировал' if new_status else 'Деактивировал'} услугу {name}")
     await callback.answer(f"✅ Услуга {'активирована' if new_status else 'деактивирована'}!", show_alert=True)
     await cb_admin_services(callback)
+
 
 @dp.callback_query(F.data.startswith("service_delete_"))
 async def cb_service_delete(callback: CallbackQuery):
@@ -1545,6 +1866,7 @@ async def cb_service_delete(callback: CallbackQuery):
     await callback.answer(f"✅ Услуга {name} удалена!", show_alert=True)
     await cb_admin_services(callback)
 
+
 @dp.callback_query(F.data == "service_add")
 async def cb_service_add(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
@@ -1558,17 +1880,20 @@ async def cb_service_add(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AdminServiceAddState.waiting_for_name)
     await callback.answer()
 
+
 @dp.message(AdminServiceAddState.waiting_for_name)
 async def process_service_add_name(message: Message, state: FSMContext):
     await state.update_data(name=message.text)
     await message.answer("📝 Введите описание услуги:")
     await state.set_state(AdminServiceAddState.waiting_for_description)
 
+
 @dp.message(AdminServiceAddState.waiting_for_description)
 async def process_service_add_desc(message: Message, state: FSMContext):
     await state.update_data(description=message.text)
     await message.answer("💰 Введите цену услуги (только число):")
     await state.set_state(AdminServiceAddState.waiting_for_price)
+
 
 @dp.message(AdminServiceAddState.waiting_for_price)
 async def process_service_add_price(message: Message, state: FSMContext):
@@ -1589,6 +1914,7 @@ async def process_service_add_price(message: Message, state: FSMContext):
         await state.clear()
     except ValueError:
         await message.answer("❌ Введите корректное число. Попробуйте снова:")
+
 
 # ===================== АДМИН: УПРАВЛЕНИЕ ГОЛОСОВАНИЯМИ =====================
 @dp.callback_query(F.data == "admin_polls")
@@ -1616,6 +1942,7 @@ async def cb_admin_polls(callback: CallbackQuery):
     await update_message(callback, text, keyboard.as_markup())
     await callback.answer()
 
+
 @dp.callback_query(F.data == "poll_create")
 async def cb_poll_create(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
@@ -1630,6 +1957,7 @@ async def cb_poll_create(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AdminPollCreateState.waiting_for_question)
     await callback.answer()
 
+
 @dp.message(AdminPollCreateState.waiting_for_question)
 async def process_poll_question(message: Message, state: FSMContext):
     await state.update_data(question=message.text)
@@ -1638,6 +1966,7 @@ async def process_poll_question(message: Message, state: FSMContext):
         "Пример: Да, Нет, Воздержался"
     )
     await state.set_state(AdminPollCreateState.waiting_for_options)
+
 
 @dp.message(AdminPollCreateState.waiting_for_options)
 async def process_poll_options(message: Message, state: FSMContext):
@@ -1651,6 +1980,7 @@ async def process_poll_options(message: Message, state: FSMContext):
         "По умолчанию - 24 часа"
     )
     await state.set_state(AdminPollCreateState.waiting_for_expiry)
+
 
 @dp.message(AdminPollCreateState.waiting_for_expiry)
 async def process_poll_expiry(message: Message, state: FSMContext):
@@ -1667,10 +1997,10 @@ async def process_poll_expiry(message: Message, state: FSMContext):
 
     users = await run_db(get_all_users)
     text = (
-        f"🎯 *НОВОЕ ГОЛОСОВАНИЕ!*\n\n"
-        f"📋 {data['question']}\n\n"
-        f"Варианты:\n" + "\n".join([f"• {opt}" for opt in data['options']]) +
-        f"\n\n⏰ Голосование активно {hours} часов."
+            f"🎯 *НОВОЕ ГОЛОСОВАНИЕ!*\n\n"
+            f"📋 {data['question']}\n\n"
+            f"Варианты:\n" + "\n".join([f"• {opt}" for opt in data['options']]) +
+            f"\n\n⏰ Голосование активно {hours} часов."
     )
 
     sent = 0
@@ -1691,6 +2021,7 @@ async def process_poll_expiry(message: Message, state: FSMContext):
         reply_markup=admin_menu_keyboard()
     )
     await state.clear()
+
 
 @dp.callback_query(F.data == "poll_results")
 async def cb_poll_results(callback: CallbackQuery):
@@ -1721,6 +2052,7 @@ async def cb_poll_results(callback: CallbackQuery):
     await update_message(callback, text, admin_menu_keyboard())
     await callback.answer()
 
+
 # ===================== АДМИН: УПРАВЛЕНИЕ ПРОМОКОДАМИ =====================
 @dp.callback_query(F.data == "admin_promocodes")
 async def cb_admin_promocodes(callback: CallbackQuery):
@@ -1745,6 +2077,7 @@ async def cb_admin_promocodes(callback: CallbackQuery):
     await update_message(callback, text, keyboard.as_markup())
     await callback.answer()
 
+
 @dp.callback_query(F.data == "promocode_create")
 async def cb_promocode_create(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
@@ -1758,6 +2091,7 @@ async def cb_promocode_create(callback: CallbackQuery, state: FSMContext):
     )
     await state.set_state(AdminPromocodeCreateState.waiting_for_discount)
     await callback.answer()
+
 
 @dp.message(AdminPromocodeCreateState.waiting_for_discount)
 async def process_promo_discount(message: Message, state: FSMContext):
@@ -1775,6 +2109,7 @@ async def process_promo_discount(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Введите корректное число. Попробуйте снова:")
 
+
 @dp.message(AdminPromocodeCreateState.waiting_for_valid_until)
 async def process_promo_valid_until(message: Message, state: FSMContext):
     try:
@@ -1790,6 +2125,7 @@ async def process_promo_valid_until(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Неверный формат. Используйте ДД.ММ.ГГГГ. Попробуйте снова:")
 
+
 @dp.message(AdminPromocodeCreateState.waiting_for_max_uses)
 async def process_promo_max_uses(message: Message, state: FSMContext):
     try:
@@ -1800,7 +2136,8 @@ async def process_promo_max_uses(message: Message, state: FSMContext):
         data = await state.get_data()
         code = generate_promo_code()
         await run_db(create_promocode, code, data['discount'], data['valid_until'], max_uses, message.from_user.id)
-        await run_db(add_admin_log, message.from_user.id, "create_promocode", f"Создал промокод {code} ({data['discount']}%)")
+        await run_db(add_admin_log, message.from_user.id, "create_promocode",
+                     f"Создал промокод {code} ({data['discount']}%)")
 
         text = (
             f"✅ *Промокод создан!*\n\n"
@@ -1813,6 +2150,7 @@ async def process_promo_max_uses(message: Message, state: FSMContext):
         await state.clear()
     except ValueError:
         await message.answer("❌ Введите корректное число. Попробуйте снова:")
+
 
 # ===================== АДМИН: ПОЛЬЗОВАТЕЛИ =====================
 @dp.callback_query(F.data == "admin_users")
@@ -1829,6 +2167,7 @@ async def cb_admin_users(callback: CallbackQuery):
     await update_message(callback, "👥 *Список пользователей:*", users_keyboard(users, 0))
     await callback.answer()
 
+
 @dp.callback_query(F.data.startswith("users_page_"))
 async def cb_users_page(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -1838,6 +2177,7 @@ async def cb_users_page(callback: CallbackQuery):
     users = await run_db(get_all_users)
     await callback.message.edit_reply_markup(reply_markup=users_keyboard(users, page))
     await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("user_orders_"))
 async def cb_user_orders_detail(callback: CallbackQuery):
@@ -1864,6 +2204,7 @@ async def cb_user_orders_detail(callback: CallbackQuery):
     keyboard.adjust(1)
     await update_message(callback, text, keyboard.as_markup())
     await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("user_") & ~F.data.startswith("user_orders_"))
 async def cb_user_detail(callback: CallbackQuery):
@@ -1910,6 +2251,7 @@ async def cb_user_detail(callback: CallbackQuery):
     await update_message(callback, text, keyboard.as_markup())
     await callback.answer()
 
+
 # ===================== АДМИН: ЗАКАЗЫ =====================
 @dp.callback_query(F.data == "admin_orders")
 async def cb_admin_orders(callback: CallbackQuery):
@@ -1925,6 +2267,7 @@ async def cb_admin_orders(callback: CallbackQuery):
     await update_message(callback, "📦 *Список заказов:*", orders_keyboard(orders, 0))
     await callback.answer()
 
+
 @dp.callback_query(F.data.startswith("orders_page_"))
 async def cb_orders_page(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -1934,6 +2277,7 @@ async def cb_orders_page(callback: CallbackQuery):
     orders = await run_db(get_all_orders)
     await callback.message.edit_reply_markup(reply_markup=orders_keyboard(orders, page))
     await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("order_"))
 async def cb_order_detail(callback: CallbackQuery):
@@ -1979,6 +2323,7 @@ async def cb_order_detail(callback: CallbackQuery):
     await update_message(callback, text, order_detail_keyboard(order_id, status, is_urgent))
     await callback.answer()
 
+
 # ===================== АДМИН: ПРИНЯТЬ СРОЧНЫЙ ЗАКАЗ =====================
 @dp.callback_query(F.data.startswith("accept_urgent_"))
 async def cb_accept_urgent(callback: CallbackQuery):
@@ -2010,6 +2355,7 @@ async def cb_accept_urgent(callback: CallbackQuery):
     await callback.answer("✅ Срочный заказ принят в работу!", show_alert=True)
     await cb_order_detail(callback)
 
+
 # ===================== АДМИН: ОТЗЫВЫ =====================
 @dp.callback_query(F.data == "admin_reviews")
 async def cb_admin_reviews(callback: CallbackQuery):
@@ -2022,8 +2368,10 @@ async def cb_admin_reviews(callback: CallbackQuery):
         await update_message(callback, "⭐ Отзывов пока нет.", admin_menu_keyboard())
         await callback.answer()
         return
-    await update_message(callback, "⭐ *Управление отзывами*\n\nВыберите отзыв для управления:", reviews_keyboard(reviews, 0))
+    await update_message(callback, "⭐ *Управление отзывами*\n\nВыберите отзыв для управления:",
+                         reviews_keyboard(reviews, 0))
     await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("reviews_page_"))
 async def cb_reviews_page(callback: CallbackQuery):
@@ -2034,6 +2382,7 @@ async def cb_reviews_page(callback: CallbackQuery):
     reviews = await run_db(get_all_reviews)
     await callback.message.edit_reply_markup(reply_markup=reviews_keyboard(reviews, page))
     await callback.answer()
+
 
 def _get_review_by_code(order_code: str):
     conn = sqlite3.connect(DB_NAME)
@@ -2048,6 +2397,7 @@ def _get_review_by_code(order_code: str):
     conn.close()
     return row
 
+
 def _delete_review_by_code(order_code: str):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
@@ -2056,12 +2406,14 @@ def _delete_review_by_code(order_code: str):
     conn.close()
     return row
 
+
 def _reset_review_by_code(order_code: str):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute("UPDATE orders SET rating = 0, review = '' WHERE order_code = ?", (order_code,))
     conn.commit()
     conn.close()
+
 
 @dp.callback_query(F.data.startswith("review_detail_"))
 async def cb_review_detail(callback: CallbackQuery):
@@ -2093,6 +2445,7 @@ async def cb_review_detail(callback: CallbackQuery):
     await update_message(callback, text, keyboard.as_markup())
     await callback.answer()
 
+
 @dp.callback_query(F.data.startswith("delete_review_"))
 async def cb_delete_review_confirm(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -2119,6 +2472,7 @@ async def cb_delete_review_confirm(callback: CallbackQuery):
     await update_message(callback, text, keyboard.as_markup())
     await callback.answer()
 
+
 @dp.callback_query(F.data.startswith("confirm_delete_review_"))
 async def cb_confirm_delete_review(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -2133,6 +2487,7 @@ async def cb_confirm_delete_review(callback: CallbackQuery):
         reply_markup=admin_menu_keyboard()
     )
     await callback.answer()
+
 
 # ===================== АДМИН: УДАЛЕНИЕ СТАРЫХ ЗАКАЗОВ =====================
 @dp.callback_query(F.data == "admin_delete_old")
@@ -2150,6 +2505,7 @@ async def cb_admin_delete_old(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AdminDeleteOldState.waiting_for_days)
     await callback.answer()
 
+
 @dp.message(AdminDeleteOldState.waiting_for_days)
 async def cb_admin_delete_old_process(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
@@ -2162,7 +2518,8 @@ async def cb_admin_delete_old_process(message: Message, state: FSMContext):
             await message.answer("❌ Количество дней должно быть положительным числом. Попробуйте снова:")
             return
         deleted_count = await run_db(delete_old_orders, days)
-        await run_db(add_admin_log, message.from_user.id, "delete_old_orders", f"Удалил {deleted_count} заказов старше {days} дней")
+        await run_db(add_admin_log, message.from_user.id, "delete_old_orders",
+                     f"Удалил {deleted_count} заказов старше {days} дней")
         await message.answer(
             f"✅ Удалено *{deleted_count}* заказов, которые были старше *{days}* дней.\n\n"
             f"Удалены только оплаченные и отменённые заказы.",
@@ -2173,6 +2530,7 @@ async def cb_admin_delete_old_process(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Введите корректное число. Попробуйте снова:")
 
+
 # ===================== АДМИН: ЛОГИ =====================
 def _get_admin_logs(limit: int = 20):
     conn = sqlite3.connect(DB_NAME)
@@ -2181,6 +2539,7 @@ def _get_admin_logs(limit: int = 20):
     rows = cur.fetchall()
     conn.close()
     return rows
+
 
 @dp.callback_query(F.data == "admin_logs")
 async def cb_admin_logs(callback: CallbackQuery):
@@ -2198,6 +2557,7 @@ async def cb_admin_logs(callback: CallbackQuery):
             text += f"• {time_str} - {action} {details}\n"
     await update_message(callback, text, admin_menu_keyboard())
     await callback.answer()
+
 
 # ===================== АДМИН: НАЗНАЧЕНИЕ ЦЕНЫ =====================
 @dp.callback_query(F.data.startswith("set_price_"))
@@ -2220,6 +2580,7 @@ async def cb_set_price_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AdminSetPriceState.waiting_for_price)
     await callback.answer()
 
+
 @dp.message(AdminSetPriceState.waiting_for_price)
 async def cb_set_price_process(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
@@ -2236,14 +2597,17 @@ async def cb_set_price_process(message: Message, state: FSMContext):
         order = await run_db(get_order, order_id)
         order_code = order[9] if order else f"#{order_id}"
         await run_db(update_order_price, order_id, new_price, "")
-        await run_db(add_admin_log, message.from_user.id, "set_price", f"Назначил цену {new_price} руб. для заказа {order_code}")
-        await message.answer(f"✅ Цена для заказа {order_code} успешно обновлена на *{new_price} руб.*", parse_mode="Markdown")
+        await run_db(add_admin_log, message.from_user.id, "set_price",
+                     f"Назначил цену {new_price} руб. для заказа {order_code}")
+        await message.answer(f"✅ Цена для заказа {order_code} успешно обновлена на *{new_price} руб.*",
+                             parse_mode="Markdown")
         await state.clear()
         await send_order_detail_message(message, order_id)
     except ValueError:
         await message.answer("❌ Введите корректное число. Попробуйте снова:")
 
-# ===================== АДМИН: ОТОБРАЖЕНИЕ ДЕТАЛЕЙ ЗАКАЗА (НОВЫМ СООБЩЕНИЕМ) =====================
+
+# ===================== АДМИН: ОТОБРАЖЕНИЕ ДЕТАЛЕЙ ЗАКАЗА =====================
 async def send_order_detail_message(message: Message, order_id: int):
     order = await run_db(get_order, order_id)
     if not order:
@@ -2282,6 +2646,7 @@ async def send_order_detail_message(message: Message, order_id: int):
 
     await message.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent))
 
+
 @dp.callback_query(F.data.startswith("start_work_"))
 async def cb_start_work(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -2310,6 +2675,7 @@ async def cb_start_work(callback: CallbackQuery):
     except Exception as e:
         logging.warning(f"Не удалось уведомить пользователя {order[1]}: {e}")
     await show_order_detail(callback.message, order_id, is_callback=False)
+
 
 @dp.callback_query(F.data.startswith("complete_work_"))
 async def cb_complete_work(callback: CallbackQuery):
@@ -2340,6 +2706,7 @@ async def cb_complete_work(callback: CallbackQuery):
         logging.warning(f"Не удалось уведомить пользователя {order[1]}: {e}")
     await show_order_detail(callback.message, order_id, is_callback=False)
 
+
 @dp.callback_query(F.data.startswith("delete_order_"))
 async def cb_delete_order(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -2369,6 +2736,7 @@ async def cb_delete_order(callback: CallbackQuery):
     )
     await callback.answer()
 
+
 @dp.callback_query(F.data.startswith("confirm_delete_order_"))
 async def cb_confirm_delete_order(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -2392,6 +2760,7 @@ async def cb_confirm_delete_order(callback: CallbackQuery):
     )
     await callback.answer()
 
+
 @dp.callback_query(F.data.startswith("confirm_payment_"))
 async def cb_confirm_payment(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -2410,7 +2779,8 @@ async def cb_confirm_payment(callback: CallbackQuery):
     admin_price = order[7]
     final_price = admin_price if admin_price > 0 else price
     await run_db(update_order_status, order_id, "paid")
-    await run_db(add_admin_log, callback.from_user.id, "confirm_payment", f"Подтвердил оплату заказа {order_code} ({final_price} руб.)")
+    await run_db(add_admin_log, callback.from_user.id, "confirm_payment",
+                 f"Подтвердил оплату заказа {order_code} ({final_price} руб.)")
     try:
         await bot.send_message(
             user_id,
@@ -2424,6 +2794,7 @@ async def cb_confirm_payment(callback: CallbackQuery):
         logging.warning(f"Не удалось уведомить пользователя {user_id}: {e}")
     await callback.answer("✅ Оплата подтверждена!", show_alert=True)
     await show_order_detail(callback.message, order_id, is_callback=True)
+
 
 async def show_order_detail(target, order_id: int, is_callback: bool = False):
     order = await run_db(get_order, order_id)
@@ -2469,6 +2840,7 @@ async def show_order_detail(target, order_id: int, is_callback: bool = False):
     else:
         await target.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent))
 
+
 # ===================== АДМИН: ПРИКРЕПИТЬ ФАЙЛ =====================
 @dp.callback_query(F.data.startswith("attach_file_"))
 async def cb_attach_file_start(callback: CallbackQuery, state: FSMContext):
@@ -2488,6 +2860,7 @@ async def cb_attach_file_start(callback: CallbackQuery, state: FSMContext):
     )
     await state.set_state(AttachFileState.waiting_for_file)
     await callback.answer()
+
 
 @dp.message(AttachFileState.waiting_for_file)
 async def cb_attach_file_process(message: Message, state: FSMContext):
@@ -2532,6 +2905,7 @@ async def cb_attach_file_process(message: Message, state: FSMContext):
         except Exception as e:
             logging.warning(f"Не удалось уведомить пользователя {order[1]}: {e}")
 
+
 # ===================== ОТЗЫВЫ (ПОЛЬЗОВАТЕЛЬ) =====================
 @dp.callback_query(F.data.startswith("review_order_"))
 async def cb_review_start(callback: CallbackQuery, state: FSMContext):
@@ -2564,6 +2938,7 @@ async def cb_review_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(ReviewState.waiting_for_rating)
     await callback.answer()
 
+
 @dp.callback_query(F.data.startswith("rating_"))
 async def cb_review_rating(callback: CallbackQuery, state: FSMContext):
     rating = int(callback.data.split("_")[1])
@@ -2575,6 +2950,7 @@ async def cb_review_rating(callback: CallbackQuery, state: FSMContext):
     )
     await state.set_state(ReviewState.waiting_for_review)
     await callback.answer()
+
 
 @dp.message(ReviewState.waiting_for_review)
 async def cb_review_process(message: Message, state: FSMContext):
@@ -2602,10 +2978,12 @@ async def cb_review_process(message: Message, state: FSMContext):
     )
     await state.clear()
 
+
 @dp.message(StateFilter(ReviewState.waiting_for_review), F.text == "/cancel")
 async def cb_review_cancel(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("❌ Отзыв отменён.", reply_markup=main_menu_keyboard())
+
 
 # ===================== ПОЛЬЗОВАТЕЛЬ: ОТМЕНА ЗАКАЗА =====================
 @dp.callback_query(F.data.startswith("cancel_order_"))
@@ -2638,9 +3016,11 @@ async def cb_cancel_order(callback: CallbackQuery):
     )
     await callback.answer()
 
+
 @dp.callback_query(F.data.startswith("refresh_order_"))
 async def cb_refresh_order(callback: CallbackQuery):
     await cb_user_order_detail(callback)
+
 
 # ===================== ПОЛЬЗОВАТЕЛЬ: ДЕТАЛИ ЗАКАЗА =====================
 @dp.callback_query(F.data.startswith("my_order_"))
@@ -2688,6 +3068,7 @@ async def cb_user_order_detail(callback: CallbackQuery):
     await update_message(callback, text, order_user_keyboard(order_id, status))
     await callback.answer()
 
+
 # ===================== СКАЧИВАНИЕ ФАЙЛА =====================
 @dp.callback_query(F.data.startswith("download_file_"))
 async def cb_download_file(callback: CallbackQuery):
@@ -2715,6 +3096,7 @@ async def cb_download_file(callback: CallbackQuery):
         logging.error(f"Ошибка отправки файла: {e}")
         await callback.answer("❌ Ошибка при отправке файла", show_alert=True)
 
+
 # ===================== ПОКУПКА (ВЫБОР УСЛУГИ) =====================
 @dp.callback_query(F.data == "buy")
 async def cb_buy(callback: CallbackQuery):
@@ -2722,8 +3104,15 @@ async def cb_buy(callback: CallbackQuery):
     await run_db(update_user_action, user_id, "buy")
     await run_db(add_user_log, user_id, "buy", "Открыл выбор услуг")
     services = await run_db(get_all_services)
-    await update_message(callback, "📚 *Выберите тип работы:*", services_keyboard_from_db(services))
+    text = (
+        "📋 *Каталог академических услуг*\n\n"
+        "Выберите необходимый тип работы. Каждый проект создаётся "
+        "индивидуально с учётом всех ваших требований и стандартов.\n\n"
+        "🔐 Все ваши данные защищены и хранятся в зашифрованном виде."
+    )
+    await update_message(callback, text, services_keyboard_from_db(services))
     await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("buyservice_"))
 async def cb_service_from_db(callback: CallbackQuery, state: FSMContext):
@@ -2764,6 +3153,7 @@ async def cb_service_from_db(callback: CallbackQuery, state: FSMContext):
     await update_message(callback, text, keyboard.as_markup())
     await callback.answer()
 
+
 @dp.callback_query(F.data.startswith("confirm_order_"))
 async def cb_confirm_order_from_db(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
@@ -2785,18 +3175,36 @@ async def cb_confirm_order_from_db(callback: CallbackQuery, state: FSMContext):
         await state.clear()
         return
 
-    # Применяем накопленную скидку по промокоду, если она есть
-    discount, discount_code = await run_db(get_pending_discount, user_id)
-    final_price = service_price
-    if discount > 0:
-        final_price = max(1, round(service_price * (1 - discount / 100)))
-        await run_db(clear_pending_discount, user_id)
+    # Проверяем активные акции
+    promotions = await run_db(get_active_promotions)
+    promo_discount = 0
+    promo_name = ""
+    if promotions:
+        # Берём максимальную скидку из активных акций
+        for promo in promotions:
+            promo_id, name, desc, discount, valid_until = promo
+            if discount > promo_discount:
+                promo_discount = discount
+                promo_name = name
 
-    order_id, order_code = await run_db(add_order, user_id, service_name, final_price, is_urgent, discount)
+    # Применяем скидку по промокоду (она перекрывает акцию, если больше)
+    discount, discount_code = await run_db(get_pending_discount, user_id)
+
+    # Используем максимальную скидку из доступных
+    final_discount = max(promo_discount, discount)
+    final_discount_code = discount_code if discount >= promo_discount else promo_name
+
+    final_price = service_price
+    if final_discount > 0:
+        final_price = max(1, round(service_price * (1 - final_discount / 100)))
+        if discount >= promo_discount and discount > 0:
+            await run_db(clear_pending_discount, user_id)
+
+    order_id, order_code = await run_db(add_order, user_id, service_name, final_price, is_urgent, final_discount)
     await run_db(update_user_action, user_id, f"order_{service_name}")
     await run_db(
         add_user_log, user_id, "create_order",
-        f"Заказ {order_code}: {service_name} ({final_price}₽) {'СРОЧНЫЙ' if is_urgent else ''} {'СКИДКА ' + str(discount) + '%' if discount else ''}"
+        f"Заказ {order_code}: {service_name} ({final_price}₽) {'СРОЧНЫЙ' if is_urgent else ''} {'СКИДКА ' + str(final_discount) + '%' if final_discount else ''}"
     )
 
     await state.clear()
@@ -2806,8 +3214,14 @@ async def cb_confirm_order_from_db(callback: CallbackQuery, state: FSMContext):
     user_name = user[2] if user else "Пользователь"
 
     urgent_text = "🔥 *СРОЧНЫЙ ЗАКАЗ!*\n" if is_urgent else ""
-    discount_text = f"🎉 Применена скидка по промокоду {discount_code}: -{discount}%\n" if discount > 0 else ""
-    price_line = f"💰 Базовая стоимость: *{service_price} ₽*\n" if discount == 0 else f"💰 Стоимость со скидкой: *{final_price} ₽* (базовая {service_price} ₽)\n"
+
+    # Формируем строку с ценой (со скидкой или без)
+    if final_discount > 0:
+        price_line = f"~~{service_price} ₽~~ **{final_price} ₽** *(скидка {final_discount}% по акции {final_discount_code})*\n"
+    else:
+        price_line = f"💰 Стоимость: *{final_price} ₽*\n"
+
+    discount_text = f"🎉 Применена скидка по акции: {final_discount_code} (-{final_discount}%)\n" if final_discount > 0 else ""
 
     text = f"""✅ *Заказ успешно создан!*
 
@@ -2823,7 +3237,9 @@ async def cb_confirm_order_from_db(callback: CallbackQuery, state: FSMContext):
 {DISPATCHER_USERNAME}
 👤 Или с CEO: {CEO_USERNAME}
 
-💬 После согласования всех деталей сообщите диспетчеру код заказа: *{order_code}*"""
+💬 После согласования всех деталей сообщите диспетчеру код заказа: *{order_code}*
+
+🔐 Ваш заказ защищён и хранится в децентрализованной системе."""
 
     keyboard = InlineKeyboardBuilder()
     dispatcher_username = DISPATCHER_USERNAME.replace("@", "")
@@ -2846,8 +3262,8 @@ async def cb_confirm_order_from_db(callback: CallbackQuery, state: FSMContext):
             msg += "\n🏷️ Код: " + order_code
             msg += "\n👤 Пользователь: @" + (username or "без username") + " (" + user_name + ")"
             msg += "\n💰 Цена: " + str(final_price) + " ₽"
-            if discount > 0:
-                msg += f"\n🎉 Скидка {discount}% по промокоду {discount_code} (база {service_price}₽)"
+            if final_discount > 0:
+                msg += f"\n🎉 Скидка {final_discount}% по акции {final_discount_code} (база {service_price}₽)"
             if is_urgent:
                 msg += "\n🔥 Срочный заказ требует немедленного внимания!"
             msg += "\n📅 " + datetime.now().strftime('%d.%m.%Y %H:%M')
@@ -2856,9 +3272,12 @@ async def cb_confirm_order_from_db(callback: CallbackQuery, state: FSMContext):
             logging.error(f"Ошибка отправки уведомления админу {admin_id}: {e}")
 
     if is_urgent:
-        asyncio.create_task(urgent_notification_loop(order_id, order_code, service_name, username, user_name, final_price))
+        asyncio.create_task(
+            urgent_notification_loop(order_id, order_code, service_name, username, user_name, final_price))
 
-async def urgent_notification_loop(order_id: int, order_code: str, service_name: str, username: str, user_name: str, price: int):
+
+async def urgent_notification_loop(order_id: int, order_code: str, service_name: str, username: str, user_name: str,
+                                   price: int):
     attempts = 0
     max_attempts = 30
 
@@ -2887,6 +3306,7 @@ async def urgent_notification_loop(order_id: int, order_code: str, service_name:
             except Exception as e:
                 logging.warning(f"Не удалось отправить напоминание админу {admin_id}: {e}")
 
+
 # ===================== ПОДДЕРЖКА =====================
 @dp.callback_query(F.data == "support")
 async def cb_support(callback: CallbackQuery, state: FSMContext):
@@ -2905,6 +3325,7 @@ async def cb_support(callback: CallbackQuery, state: FSMContext):
     await update_message(callback, text, back_to_main_keyboard())
     await state.set_state(SupportState.waiting_for_message)
     await callback.answer()
+
 
 @dp.message(SupportState.waiting_for_message)
 async def support_send_message(message: Message, state: FSMContext):
@@ -2927,15 +3348,18 @@ async def support_send_message(message: Message, state: FSMContext):
         except Exception as e:
             logging.warning(f"Не удалось отправить сообщение админу {admin_id}: {e}")
     if sent_to > 0:
-        await message.answer("✅ Ваше сообщение отправлено автору. Он ответит вам здесь.", reply_markup=back_to_main_keyboard())
+        await message.answer("✅ Ваше сообщение отправлено автору. Он ответит вам здесь.",
+                             reply_markup=back_to_main_keyboard())
     else:
         await message.answer("❌ Не удалось отправить сообщение. Попробуйте позже.")
     await state.clear()
+
 
 @dp.message(StateFilter(SupportState.waiting_for_message), F.text == "/cancel")
 async def support_cancel(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Режим поддержки отменён.", reply_markup=main_menu_keyboard())
+
 
 # ===================== МОИ ЗАКАЗЫ =====================
 @dp.callback_query(F.data == "my_orders")
@@ -2952,7 +3376,8 @@ async def cb_my_orders(callback: CallbackQuery):
     text = "📋 *Ваши заказы:*\n\n"
     for order in orders:
         order_id, service, price, status, created_at, admin_price, order_code, rating, _, is_urgent = order
-        status_text = {"pending": "⏳ Ожидает оплаты", "paid": "✅ Оплачен", "in_progress": "🔧 В работе", "cancelled": "❌ Отменён"}.get(status, status)
+        status_text = {"pending": "⏳ Ожидает оплаты", "paid": "✅ Оплачен", "in_progress": "🔧 В работе",
+                       "cancelled": "❌ Отменён"}.get(status, status)
         final_price = admin_price if admin_price > 0 else price
         created = datetime.fromisoformat(created_at).strftime("%d.%m.%Y")
         display_code = order_code or f"#{order_id}"
@@ -2965,11 +3390,13 @@ async def cb_my_orders(callback: CallbackQuery):
         display_code = order_code or f"#{order_id}"
         status_emoji = "✅" if status == "paid" else "⏳" if status == "pending" else "🔧" if status == "in_progress" else "❌"
         urgent = "🔥" if is_urgent else ""
-        builder.button(text=f"{status_emoji}{urgent} {display_code} - {service[:15]}", callback_data=f"my_order_{order_id}")
+        builder.button(text=f"{status_emoji}{urgent} {display_code} - {service[:15]}",
+                       callback_data=f"my_order_{order_id}")
     builder.button(text="🔙 Назад", callback_data="main_menu")
     builder.adjust(1)
     await update_message(callback, text, builder.as_markup())
     await callback.answer()
+
 
 # ===================== ОСТАЛЬНЫЕ CALLBACK =====================
 @dp.callback_query(F.data == "main_menu")
@@ -2977,7 +3404,7 @@ async def cb_main_menu(callback: CallbackQuery):
     user_id = callback.from_user.id
     await run_db(update_user_action, user_id, "main_menu")
     await run_db(add_user_log, user_id, "main_menu", "Вернулся в главное меню")
-    text = "🎵 Sopranidi Corp.\n\nВыберите услугу ниже 👇"
+    text = "🏛️ *Sopranidi Corp.*\n\nВыберите необходимый сервис ниже 👇"
     if callback.message.photo:
         try:
             await callback.message.delete()
@@ -2987,6 +3414,7 @@ async def cb_main_menu(callback: CallbackQuery):
     else:
         await update_message(callback, text, main_menu_keyboard())
     await callback.answer()
+
 
 @dp.callback_query(F.data == "admin_menu")
 async def cb_admin_menu(callback: CallbackQuery):
@@ -3010,6 +3438,7 @@ async def cb_admin_menu(callback: CallbackQuery):
     await update_message(callback, text, admin_menu_keyboard())
     await callback.answer()
 
+
 # ===================== ПРИМЕРЫ РАБОТ =====================
 @dp.callback_query(F.data == "examples")
 async def cb_examples(callback: CallbackQuery):
@@ -3024,6 +3453,7 @@ async def cb_examples(callback: CallbackQuery):
     builder.adjust(1)
     await update_message(callback, "📂 *Примеры выполненных работ*\n\nВыберите работу:", builder.as_markup())
     await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("example_"))
 async def send_example(callback: CallbackQuery):
@@ -3062,6 +3492,7 @@ async def send_example(callback: CallbackQuery):
         logging.error(f"Ошибка отправки: {e}")
         await callback.answer("❌ Ошибка при отправке", show_alert=True)
 
+
 # ===================== РАССЫЛКА (FSM) =====================
 @dp.message(AdminBroadcastState.waiting_for_message)
 async def broadcast_send(message: Message, state: FSMContext):
@@ -3080,13 +3511,14 @@ async def broadcast_send(message: Message, state: FSMContext):
         except Exception as e:
             failed += 1
             logging.debug(f"Не удалось отправить рассылку {uid[0]}: {e}")
-    await run_db(add_admin_log, message.from_user.id, "broadcast", f"Отправил рассылку {sent} пользователям ({failed} неудачно)")
+    await run_db(add_admin_log, message.from_user.id, "broadcast",
+                 f"Отправил рассылку {sent} пользователям ({failed} неудачно)")
     await message.answer(f"✅ Рассылка выполнена. Отправлено {sent} пользователям, не доставлено {failed}.")
     await state.clear()
 
+
 # ===================== ФОНОВЫЕ ЗАДАЧИ =====================
 async def birthday_checker_loop():
-    """Раз в час проверяет, у кого сегодня день рождения, и поздравляет (один раз в год)."""
     while True:
         try:
             today_str = datetime.now().strftime("%d.%m")
@@ -3107,10 +3539,10 @@ async def birthday_checker_loop():
                     logging.warning(f"Не удалось поздравить пользователя {user_id}: {e}")
         except Exception as e:
             logging.error(f"Ошибка в birthday_checker_loop: {e}")
-        await asyncio.sleep(3600)  # проверка раз в час
+        await asyncio.sleep(3600)
+
 
 async def poll_closer_loop():
-    """Раз в 5 минут закрывает голосования, у которых истёк срок действия."""
     while True:
         try:
             expired = await run_db(get_expired_active_polls)
@@ -3119,7 +3551,8 @@ async def poll_closer_loop():
                 logging.info(f"Голосование '{question}' автоматически закрыто (id={poll_id})")
         except Exception as e:
             logging.error(f"Ошибка в poll_closer_loop: {e}")
-        await asyncio.sleep(300)  # проверка раз в 5 минут
+        await asyncio.sleep(300)
+
 
 # ===================== ЗАПУСК БОТА =====================
 async def main():
@@ -3133,6 +3566,7 @@ async def main():
     asyncio.create_task(poll_closer_loop())
 
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
