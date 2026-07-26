@@ -22,7 +22,6 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 # ===================== ЗАГРУЗКА .ENV (ЕСЛИ ЕСТЬ) =====================
 try:
     from dotenv import load_dotenv
-
     load_dotenv()
 except ImportError:
     pass
@@ -31,7 +30,6 @@ except ImportError:
 try:
     import openpyxl
     from openpyxl.styles import Font, PatternFill, Alignment
-
     EXCEL_AVAILABLE = True
 except ImportError:
     EXCEL_AVAILABLE = False
@@ -1263,12 +1261,11 @@ class AdminPromotionCreateState(StatesGroup):
 
 
 # ===================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====================
-async def update_message(callback: CallbackQuery, text: str, reply_markup=None, parse_mode=None):
+async def update_message(callback: CallbackQuery, text: str, reply_markup=None):
     try:
         await callback.message.edit_text(
             text,
-            reply_markup=reply_markup,
-            parse_mode=parse_mode
+            reply_markup=reply_markup
         )
     except Exception as e:
         err = str(e)
@@ -1281,33 +1278,22 @@ async def update_message(callback: CallbackQuery, text: str, reply_markup=None, 
                 pass
             await callback.message.answer(
                 text,
-                reply_markup=reply_markup,
-                parse_mode=parse_mode
-            )
-        elif "can't parse entities" in err:
-            await callback.message.answer(
-                text,
-                reply_markup=reply_markup,
-                parse_mode=None
+                reply_markup=reply_markup
             )
         else:
             logging.error(f"Ошибка обновления сообщения: {e}")
             await callback.message.answer(
                 text,
-                reply_markup=reply_markup,
-                parse_mode=parse_mode
+                reply_markup=reply_markup
             )
 
 
-async def send_safe_message(message: Message, text: str, reply_markup=None, parse_mode=None):
+async def send_safe_message(message: Message, text: str, reply_markup=None):
     try:
-        await message.answer(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        await message.answer(text, reply_markup=reply_markup)
     except Exception as e:
         logging.error(f"Ошибка отправки сообщения: {e}")
-        if "can't parse entities" in str(e):
-            await message.answer(text, reply_markup=reply_markup, parse_mode=None)
-        else:
-            await message.answer(text, reply_markup=reply_markup)
+        await message.answer(text, reply_markup=reply_markup)
 
 
 # ===================== ОБРАБОТЧИКИ КОМАНД =====================
@@ -3404,30 +3390,49 @@ async def cb_service_from_db(callback: CallbackQuery, state: FSMContext):
         await callback.answer("❌ Эта услуга временно недоступна", show_alert=True)
         return
 
+    # Получаем скидки
+    promotions = await run_db(get_active_promotions)
+    promo_discount = 0
+    promo_name = ""
+    for promo in promotions:
+        if promo[3] > promo_discount:
+            promo_discount = promo[3]
+            promo_name = promo[1]
+    discount, discount_code = await run_db(get_pending_discount, callback.from_user.id)
+    final_discount = max(promo_discount, discount)
+    final_discount_name = discount_code if discount >= promo_discount else promo_name
+
     await state.update_data(
         service_id=service_id,
         service_name=name,
         service_price=price,
-        service_description=description
+        discount=final_discount,
+        discount_name=final_discount_name
     )
 
-    text = (
-        f"📋 Вы выбрали: {name}\n\n"
-        f"📝 {description}\n\n"
-        f"💰 Базовая стоимость: {price} ₽\n\n"
-        f"📌 Важно! Окончательная цена и сроки зависят от:\n"
-        f"• Тема работы\n"
-        f"• Сложность и объём\n"
-        f"• Текущая загрузка команды\n\n"
-        f"✅ Подтвердите создание заказа:"
-    )
+    text = f"""
+📋 Вы выбрали: {name}
 
+📝 {description}
+
+💰 Цена: {format_price_with_discount(price, final_discount)}
+"""
+    if final_discount > 0:
+        text += f"\n🎉 Применяется скидка: {final_discount}% (акция: {final_discount_name})"
+    text += """
+
+📌 Важно! Окончательная цена и сроки зависят от:
+• Тема работы
+• Сложность и объём
+• Текущая загрузка команды
+
+✅ Подтвердите создание заказа:
+"""
     keyboard = InlineKeyboardBuilder()
     keyboard.button(text="✅ Обычный заказ", callback_data=f"confirm_order_{service_id}")
     keyboard.button(text="🔥 Срочный заказ", callback_data=f"confirm_order_urgent_{service_id}")
     keyboard.button(text="❌ Отмена", callback_data="buy")
     keyboard.adjust(1)
-
     await update_message(callback, text, keyboard.as_markup())
     await callback.answer()
 
@@ -3447,41 +3452,23 @@ async def cb_confirm_order_from_db(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     service_name = data.get("service_name")
     service_price = data.get("service_price")
+    discount = data.get("discount", 0)
+    discount_name = data.get("discount_name", "")
 
     if not service_name:
         await callback.answer("❌ Ошибка: выберите услугу заново", show_alert=True)
         await state.clear()
         return
 
-    # Проверяем активные акции
-    promotions = await run_db(get_active_promotions)
-    promo_discount = 0
-    promo_name = ""
-    if promotions:
-        for promo in promotions:
-            promo_id, name, desc, discount, valid_until = promo
-            if discount > promo_discount:
-                promo_discount = discount
-                promo_name = name
+    final_price = max(1, round(service_price * (1 - discount / 100))) if discount > 0 else service_price
+    if discount > 0:
+        await run_db(clear_pending_discount, user_id)
 
-    # Применяем скидку по промокоду
-    discount, discount_code = await run_db(get_pending_discount, user_id)
-
-    # Используем максимальную скидку
-    final_discount = max(promo_discount, discount)
-    final_discount_code = discount_code if discount >= promo_discount else promo_name
-
-    final_price = service_price
-    if final_discount > 0:
-        final_price = max(1, round(service_price * (1 - final_discount / 100)))
-        if discount >= promo_discount and discount > 0:
-            await run_db(clear_pending_discount, user_id)
-
-    order_id, order_code = await run_db(add_order, user_id, service_name, final_price, is_urgent, final_discount)
+    order_id, order_code = await run_db(add_order, user_id, service_name, final_price, is_urgent, discount)
     await run_db(update_user_action, user_id, f"order_{service_name}")
     await run_db(
         add_user_log, user_id, "create_order",
-        f"Заказ {order_code}: {service_name} ({final_price}₽) {'СРОЧНЫЙ' if is_urgent else ''} {'СКИДКА ' + str(final_discount) + '%' if final_discount else ''}"
+        f"Заказ {order_code}: {service_name} ({final_price}₽) {'СРОЧНЫЙ' if is_urgent else ''} {'СКИДКА ' + str(discount) + '%' if discount else ''}"
     )
 
     await state.clear()
@@ -3492,17 +3479,15 @@ async def cb_confirm_order_from_db(callback: CallbackQuery, state: FSMContext):
 
     urgent_text = "🔥 СРОЧНЫЙ ЗАКАЗ!\n" if is_urgent else ""
 
-    if final_discount > 0:
-        price_line = f"~~{service_price}~~ **{final_price}** (скидка {final_discount}% по акции {final_discount_code})\n"
+    if discount > 0:
+        price_line = f"💰 Стоимость со скидкой: {final_price} руб. (базовая {service_price} руб., скидка {discount}% по акции {discount_name})\n"
     else:
         price_line = f"💰 Стоимость: {final_price} руб.\n"
-
-    discount_text = f"🎉 Применена скидка по акции: {final_discount_code} (-{final_discount}%)\n" if final_discount > 0 else ""
 
     text = f"""✅ Заказ успешно создан!
 
 {urgent_text}📋 Услуга: {service_name}
-{price_line}{discount_text}🏷️ Код заказа: {order_code}
+{price_line}🏷️ Код заказа: {order_code}
 
 📌 Важно! Окончательная цена и сроки зависят от:
 • Тема работы
@@ -3538,8 +3523,8 @@ async def cb_confirm_order_from_db(callback: CallbackQuery, state: FSMContext):
             msg += "\n🏷️ Код: " + order_code
             msg += "\n👤 Пользователь: @" + (username or "без username") + " (" + user_name + ")"
             msg += "\n💰 Цена: " + str(final_price) + " ₽"
-            if final_discount > 0:
-                msg += f"\n🎉 Скидка {final_discount}% по акции {final_discount_code} (база {service_price}₽)"
+            if discount > 0:
+                msg += f"\n🎉 Скидка {discount}% по акции {discount_name} (база {service_price}₽)"
             if is_urgent:
                 msg += "\n🔥 Срочный заказ требует немедленного внимания!"
             msg += "\n📅 " + datetime.now().strftime('%d.%m.%Y %H:%M')
