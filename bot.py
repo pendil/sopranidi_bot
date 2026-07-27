@@ -1934,8 +1934,18 @@ async def cb_promotion_delete(callback: CallbackQuery):
 
 
 @dp.message(F.text & F.text.isdigit())
-async def process_promotion_id(message: Message):
+async def process_promotion_id(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
+        return
+
+    # Проверяем, не находится ли пользователь в режиме редактирования услуги
+    current_state = await state.get_state()
+    if current_state in [
+        "AdminServiceEditState:waiting_for_price",
+        "AdminServiceAddState:waiting_for_price",
+        "AdminSetPriceState:waiting_for_price"
+    ]:
+        # Если пользователь вводит цену для услуги — пропускаем
         return
 
     try:
@@ -1968,7 +1978,6 @@ async def process_promotion_id(message: Message):
         reply_markup=keyboard.as_markup(),
         parse_mode="HTML"
     )
-
 
 @dp.callback_query(F.data.startswith("promotion_do_activate_"))
 async def cb_promotion_do_activate(callback: CallbackQuery):
