@@ -1075,12 +1075,39 @@ def admin_menu_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def services_keyboard_from_db(services: list) -> InlineKeyboardMarkup:
+def services_keyboard_from_db(services: list, user_id: int = None) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+
     for service in services:
         s_id, name, desc, price, is_active = service
-        if is_active:
-            builder.button(text=f"📝 {name} (от {price}₽)", callback_data=f"buyservice_{s_id}")
+        if not is_active:
+            continue
+
+        # Если есть user_id, проверяем скидки для этого пользователя
+        display_price = price
+        discount_text = ""
+
+        if user_id:
+            # Получаем скидки
+            promotions = get_active_promotions()
+            promo_discount = 0
+            for promo in promotions:
+                if promo[3] > promo_discount:
+                    promo_discount = promo[3]
+
+            discount, _ = get_pending_discount(user_id)
+            final_discount = max(promo_discount, discount)
+
+            if final_discount > 0:
+                new_price = max(1, round(price * (1 - final_discount / 100)))
+                display_price = new_price
+                discount_text = f" 🔥-{final_discount}%"
+
+        builder.button(
+            text=f"📝 {name} (от {display_price}₽){discount_text}",
+            callback_data=f"buyservice_{s_id}"
+        )
+
     builder.button(text="🔙 Назад", callback_data="main_menu")
     builder.adjust(1)
     return builder.as_markup()
@@ -3452,6 +3479,20 @@ async def cb_buy(callback: CallbackQuery):
     await run_db(update_user_action, user_id, "buy")
     await run_db(add_user_log, user_id, "buy", "Открыл выбор услуг")
     services = await run_db(get_all_services)
+
+    # Получаем скидки для пользователя
+    promotions = await run_db(get_active_promotions)
+    promo_discount = 0
+    promo_name = ""
+    for promo in promotions:
+        if promo[3] > promo_discount:
+            promo_discount = promo[3]
+            promo_name = promo[1]
+
+    discount, discount_code = await run_db(get_pending_discount, user_id)
+    final_discount = max(promo_discount, discount)
+    final_discount_name = discount_code if discount >= promo_discount else promo_name
+
     text = """
 <b>📋 Каталог академических услуг</b>
 
@@ -3459,7 +3500,12 @@ async def cb_buy(callback: CallbackQuery):
 
 🔐 Все ваши данные защищены и хранятся в зашифрованном виде.
 """
-    await update_message(callback, text, services_keyboard_from_db(services), "HTML")
+
+    if final_discount > 0:
+        text += f"\n🎉 <b>У вас активна скидка {final_discount}%</b> (акция: {final_discount_name})"
+        text += "\n<i>Цены в каталоге уже отображаются со скидкой!</i>"
+
+    await update_message(callback, text, services_keyboard_from_db(services, user_id), "HTML")
     await callback.answer()
 
 
@@ -3483,6 +3529,7 @@ async def cb_service_from_db(callback: CallbackQuery, state: FSMContext):
         if promo[3] > promo_discount:
             promo_discount = promo[3]
             promo_name = promo[1]
+
     discount, discount_code = await run_db(get_pending_discount, callback.from_user.id)
     final_discount = max(promo_discount, discount)
     final_discount_name = discount_code if discount >= promo_discount else promo_name
