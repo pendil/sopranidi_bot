@@ -1,27 +1,56 @@
 import sqlite3
 import os
+from pathlib import Path
 
-# Находим базу данных
-DB_NAME = "data/shop_bot.db"
 
-# Если папка data не существует, пробуем persistent
-if not os.path.exists("data"):
-    DB_NAME = "/persistent/shop_bot.db"
+def find_db():
+    """Ищет базу данных в разных местах"""
+    possible_paths = [
+        "data/shop_bot.db",  # локально
+        "/persistent/shop_bot.db",  # на BotHost
+        "shop_bot.db",  # в корне
+        "data/shop_bot.db",  # снова
+        str(Path(__file__).parent / "data" / "shop_bot.db"),  # через Path
+    ]
+
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
+    return None
 
 
 def update_prices():
+    db_path = find_db()
+
+    if not db_path:
+        print("❌ База данных не найдена!")
+        print("   Искал в:")
+        print("   - data/shop_bot.db")
+        print("   - /persistent/shop_bot.db")
+        print("   - shop_bot.db")
+        print("\n   Сначала запустите бота хотя бы раз, чтобы создать БД.")
+        return
+
+    print(f"✅ Найдена БД: {db_path}")
+
     try:
-        conn = sqlite3.connect(DB_NAME)
+        conn = sqlite3.connect(db_path)
         cur = conn.cursor()
 
-        print("📊 Текущие цены:")
+        # Проверяем, есть ли таблица services
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='services'")
+        if not cur.fetchone():
+            print("❌ Таблица services не существует!")
+            print("   Запустите бота, чтобы создать таблицу.")
+            conn.close()
+            return
+
+        print("\n📊 Текущие цены:")
         cur.execute("SELECT id, name, price FROM services")
         rows = cur.fetchall()
 
         if not rows:
-            print("❌ Таблица services пуста или не существует.")
-            print("   Возможно, бот ещё не создал базу данных.")
-            print("   Запустите бота хотя бы раз, чтобы создать БД.")
+            print("❌ Нет услуг в базе!")
             conn.close()
             return
 
@@ -40,27 +69,29 @@ def update_prices():
             ("Защитное слово", 99),
         ]
 
+        updated_count = 0
         for name, price in updates:
             cur.execute("UPDATE services SET price = ? WHERE name = ?", (price, name))
             if cur.rowcount > 0:
                 print(f"  ✅ {name} → {price} ₽")
+                updated_count += 1
             else:
                 print(f"  ⚠️ {name} не найдена")
 
         conn.commit()
 
-        print("\n📊 Новые цены:")
+        print(f"\n✅ Обновлено {updated_count} услуг")
+
+        print("\n📊 Проверка новых цен:")
         cur.execute("SELECT id, name, price FROM services")
         for row in cur.fetchall():
             print(f"  {row[0]}. {row[1]} - {row[2]} ₽")
 
         conn.close()
-        print("\n✅ Готово!")
+        print("\n🎉 Готово!")
 
-    except sqlite3.OperationalError as e:
+    except Exception as e:
         print(f"❌ Ошибка: {e}")
-        print("   Проверьте, что база данных существует и путь правильный.")
-        print(f"   Ищем БД по пути: {DB_NAME}")
 
 
 if __name__ == "__main__":
