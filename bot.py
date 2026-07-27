@@ -347,6 +347,17 @@ def init_db():
     conn.commit()
     conn.close()
     logging.info("✅ База данных проверена/создана!")
+    # Обновление цен (миграция)
+    try:
+        cur.execute("UPDATE services SET price = 2490 WHERE name = 'Курсовая работа' AND price = 2500")
+        cur.execute("UPDATE services SET price = 1490 WHERE name = 'Школьный проект' AND price = 1500")
+        cur.execute("UPDATE services SET price = 2990 WHERE name = 'Отчёт по практике' AND price = 3000")
+        cur.execute("UPDATE services SET price = 299 WHERE name = 'Презентация' AND price = 300")
+        cur.execute("UPDATE services SET price = 99 WHERE name = 'Защитное слово' AND price = 100")
+        conn.commit()
+        logging.info("✅ Цены на услуги обновлены")
+    except:
+        pass
 
 
 # ===================== ФУНКЦИИ РАБОТЫ С БАЗОЙ =====================
