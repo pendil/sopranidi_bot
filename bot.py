@@ -1938,10 +1938,9 @@ async def process_promotion_id(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
 
-    # Проверяем, не находится ли пользователь в режиме редактирования услуги
     current_state = await state.get_state()
 
-    # Список состояний, в которых мы НЕ должны перехватывать сообщения
+    # Состояния, в которых мы НЕ должны перехватывать сообщения
     skip_states = [
         "AdminServiceEditState:waiting_for_price",
         "AdminServiceAddState:waiting_for_price",
@@ -1958,7 +1957,6 @@ async def process_promotion_id(message: Message, state: FSMContext):
         "AdminDeleteOldState:waiting_for_days",
     ]
 
-    # Если пользователь в одном из этих состояний — пропускаем
     if current_state in skip_states:
         return
 
@@ -1972,7 +1970,8 @@ async def process_promotion_id(message: Message, state: FSMContext):
     if not promo:
         await message.answer(
             f"❌ Акция с ID {promo_id} не найдена.\n\n<i>Если вы пытались изменить цену услуги, используйте кнопку 'Редактировать' в админ-панели.</i>",
-            parse_mode="HTML")
+            parse_mode="HTML"
+        )
         return
 
     promo_id, name, description, discount, valid_until, is_active = promo
@@ -1993,7 +1992,7 @@ async def process_promotion_id(message: Message, state: FSMContext):
         f"Выберите действие:",
         reply_markup=keyboard.as_markup(),
         parse_mode="HTML"
-        )
+    )
 
 @dp.callback_query(F.data.startswith("promotion_do_activate_"))
 async def cb_promotion_do_activate(callback: CallbackQuery):
