@@ -19,6 +19,12 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+def escape_html(text: str) -> str:
+    """Экранирует специальные HTML-символы"""
+    if not text:
+        return ""
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
 # ===================== ЗАГРУЗКА .ENV (ЕСЛИ ЕСТЬ) =====================
 try:
     from dotenv import load_dotenv
@@ -1938,26 +1944,9 @@ async def process_promotion_id(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
 
+    # Проверяем состояние — если мы в режиме редактирования услуги, пропускаем
     current_state = await state.get_state()
-
-    # Состояния, в которых мы НЕ должны перехватывать сообщения
-    skip_states = [
-        "AdminServiceEditState:waiting_for_price",
-        "AdminServiceAddState:waiting_for_price",
-        "AdminSetPriceState:waiting_for_price",
-        "AdminServiceEditState:waiting_for_name",
-        "AdminServiceEditState:waiting_for_description",
-        "AdminServiceAddState:waiting_for_name",
-        "AdminServiceAddState:waiting_for_description",
-        "AdminPromotionCreateState:waiting_for_discount",
-        "AdminPromotionCreateState:waiting_for_valid_until",
-        "AdminPromocodeCreateState:waiting_for_discount",
-        "AdminPromocodeCreateState:waiting_for_valid_until",
-        "AdminPromocodeCreateState:waiting_for_max_uses",
-        "AdminDeleteOldState:waiting_for_days",
-    ]
-
-    if current_state in skip_states:
+    if current_state and "Service" in current_state:
         return
 
     try:
@@ -1968,10 +1957,7 @@ async def process_promotion_id(message: Message, state: FSMContext):
 
     promo = await run_db(get_promotion_by_id, promo_id)
     if not promo:
-        await message.answer(
-            f"❌ Акция с ID {promo_id} не найдена.\n\n<i>Если вы пытались изменить цену услуги, используйте кнопку 'Редактировать' в админ-панели.</i>",
-            parse_mode="HTML"
-        )
+        await message.answer(f"❌ Акция с ID {promo_id} не найдена.", parse_mode="HTML")
         return
 
     promo_id, name, description, discount, valid_until, is_active = promo
@@ -2146,6 +2132,7 @@ async def process_service_edit_price(message: Message, state: FSMContext):
         await message.answer("❌ Услуга не найдена.", reply_markup=admin_menu_keyboard(), parse_mode="HTML")
         await state.clear()
         return
+
     _, old_name, old_desc, old_price, is_active = service
 
     new_price = old_price
