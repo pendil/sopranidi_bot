@@ -19,15 +19,10 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-def escape_html(text: str) -> str:
-    """Экранирует специальные HTML-символы"""
-    if not text:
-        return ""
-    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
 # ===================== ЗАГРУЗКА .ENV (ЕСЛИ ЕСТЬ) =====================
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except ImportError:
     pass
@@ -36,6 +31,7 @@ except ImportError:
 try:
     import openpyxl
     from openpyxl.styles import Font, PatternFill, Alignment
+
     EXCEL_AVAILABLE = True
 except ImportError:
     EXCEL_AVAILABLE = False
@@ -118,6 +114,21 @@ def generate_unique_order_code() -> str:
 def generate_promo_code() -> str:
     letters = string.ascii_uppercase + string.digits
     return ''.join(random.choice(letters) for _ in range(8))
+
+
+def escape_html(text: str) -> str:
+    """Экранирует специальные HTML-символы"""
+    if not text:
+        return ""
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def format_price_with_discount(original_price: int, discount: int) -> str:
+    """Форматирует цену со скидкой в HTML (безопасно)"""
+    if discount <= 0:
+        return f"<b>{original_price} ₽</b>"
+    new_price = max(1, round(original_price * (1 - discount / 100)))
+    return f"<s>{original_price} ₽</s> → <b>{new_price} ₽</b> 🎉"
 
 
 # ===================== БАЗА ДАННЫХ =====================
@@ -255,6 +266,8 @@ def init_db():
             ("Доклад", "Подготовка качественного доклада на любую тему", 500),
             ("Презентация", "Создание стильной и информативной презентации", 299),
             ("Защитное слово", "Составление защитного слова для проекта", 99),
+            ("Реферат", "Написание качественного реферата по любой теме", 1200),
+            ("Редактирование работы", "Правка и доработка готовой работы", 800),
         ]
         for name, desc, price in default_services:
             cur.execute(
@@ -347,17 +360,51 @@ def init_db():
     conn.commit()
     conn.close()
     logging.info("✅ База данных проверена/создана!")
-    # Обновление цен (миграция)
-    try:
-        cur.execute("UPDATE services SET price = 2490 WHERE name = 'Курсовая работа' AND price = 2500")
-        cur.execute("UPDATE services SET price = 1490 WHERE name = 'Школьный проект' AND price = 1500")
-        cur.execute("UPDATE services SET price = 2990 WHERE name = 'Отчёт по практике' AND price = 3000")
-        cur.execute("UPDATE services SET price = 299 WHERE name = 'Презентация' AND price = 300")
-        cur.execute("UPDATE services SET price = 99 WHERE name = 'Защитное слово' AND price = 100")
-        conn.commit()
-        logging.info("✅ Цены на услуги обновлены")
-    except:
-        pass
+
+
+def get_service_discount(service_id: int, user_id: int) -> tuple:
+    """Возвращает скидку для конкретной услуги (скидка, название)"""
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+
+    # Проверяем акции на эту услугу
+    cur.execute(
+        "SELECT id, name, description, discount, valid_until FROM promotions "
+        "WHERE is_active = 1 AND valid_until > ? AND service_id = ? "
+        "ORDER BY discount DESC LIMIT 1",
+        (datetime.now().isoformat(), service_id)
+    )
+    promo = cur.fetchone()
+
+    # Проверяем общие акции (service_id = 0)
+    cur.execute(
+        "SELECT id, name, description, discount, valid_until FROM promotions "
+        "WHERE is_active = 1 AND valid_until > ? AND (service_id = 0 OR service_id IS NULL) "
+        "ORDER BY discount DESC LIMIT 1",
+        (datetime.now().isoformat(),)
+    )
+    general_promo = cur.fetchone()
+
+    conn.close()
+
+    # Берём максимальную скидку
+    promo_discount = 0
+    promo_name = ""
+
+    if promo and promo[3] > promo_discount:
+        promo_discount = promo[3]
+        promo_name = promo[1]
+
+    if general_promo and general_promo[3] > promo_discount:
+        promo_discount = general_promo[3]
+        promo_name = general_promo[1]
+
+    # Проверяем промокод пользователя
+    discount, discount_code = get_pending_discount(user_id)
+
+    if discount > promo_discount:
+        return discount, discount_code
+    return promo_discount, promo_name
 
 
 # ===================== ФУНКЦИИ РАБОТЫ С БАЗОЙ =====================
@@ -762,12 +809,13 @@ def get_services_keyboard(services: list) -> InlineKeyboardMarkup:
 
 
 # ===================== УПРАВЛЕНИЕ АКЦИЯМИ =====================
-def create_promotion(name: str, description: str, discount: int, valid_until: str):
+def create_promotion(name: str, description: str, discount: int, valid_until: str, service_id: int = 0):
+    """Создаёт акцию. Если service_id = 0 — акция на все услуги"""
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO promotions (name, description, discount, valid_until, created_at) VALUES (?, ?, ?, ?, ?)",
-        (name, description, discount, valid_until, datetime.now().isoformat())
+        "INSERT INTO promotions (name, description, discount, valid_until, service_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (name, description, discount, valid_until, service_id, datetime.now().isoformat())
     )
     promo_id = cur.lastrowid
     conn.commit()
@@ -775,13 +823,24 @@ def create_promotion(name: str, description: str, discount: int, valid_until: st
     return promo_id
 
 
-def get_active_promotions():
+def get_active_promotions(service_id: int = 0):
+    """Получает активные акции. Если service_id указан — только для этой услуги"""
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
-    cur.execute(
-        "SELECT id, name, description, discount, valid_until FROM promotions WHERE is_active = 1 AND valid_until > ? ORDER BY id DESC",
-        (datetime.now().isoformat(),)
-    )
+
+    if service_id > 0:
+        cur.execute(
+            "SELECT id, name, description, discount, valid_until, service_id FROM promotions "
+            "WHERE is_active = 1 AND valid_until > ? AND (service_id = ? OR service_id = 0) "
+            "ORDER BY discount DESC",
+            (datetime.now().isoformat(), service_id)
+        )
+    else:
+        cur.execute(
+            "SELECT id, name, description, discount, valid_until, service_id FROM promotions "
+            "WHERE is_active = 1 AND valid_until > ? ORDER BY discount DESC",
+            (datetime.now().isoformat(),)
+        )
     rows = cur.fetchall()
     conn.close()
     return rows
@@ -791,7 +850,7 @@ def get_all_promotions():
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, name, description, discount, valid_until, is_active, created_at FROM promotions ORDER BY id DESC"
+        "SELECT id, name, description, discount, valid_until, is_active, created_at, service_id FROM promotions ORDER BY id DESC"
     )
     rows = cur.fetchall()
     conn.close()
@@ -801,8 +860,9 @@ def get_all_promotions():
 def get_promotion_by_id(promo_id: int):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
-    cur.execute("SELECT id, name, description, discount, valid_until, is_active FROM promotions WHERE id = ?",
-                (promo_id,))
+    cur.execute(
+        "SELECT id, name, description, discount, valid_until, is_active, service_id FROM promotions WHERE id = ?",
+        (promo_id,))
     row = cur.fetchone()
     conn.close()
     return row
@@ -1040,19 +1100,6 @@ def export_orders_to_excel():
     return output
 
 
-def escape_html(text: str) -> str:
-    """Экранирует специальные HTML-символы для безопасного отображения"""
-    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-def format_price_with_discount(original_price: int, discount: int) -> str:
-    """Форматирует цену со скидкой в HTML (безопасно)"""
-    if discount <= 0:
-        return f"<b>{original_price} ₽</b>"
-    new_price = max(1, round(original_price * (1 - discount / 100)))
-    return f"<s>{original_price} ₽</s> → <b>{new_price} ₽</b> 🎉"
-
-
 # ===================== КЛАВИАТУРЫ =====================
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -1089,33 +1136,38 @@ def admin_menu_keyboard() -> InlineKeyboardMarkup:
 def services_keyboard_from_db(services: list, user_id: int = None) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
 
+    # Эмодзи для услуг
+    emoji_map = {
+        "Курсовая работа": "📝",
+        "Школьный проект": "🏫",
+        "Отчёт по практике": "📊",
+        "Доклад": "🎤",
+        "Презентация": "📽️",
+        "Защитное слово": "🛡️",
+        "Реферат": "📚",
+        "Редактирование работы": "✏️",
+    }
+
     for service in services:
         s_id, name, desc, price, is_active = service
         if not is_active:
             continue
 
-        # Если есть user_id, проверяем скидки для этого пользователя
         display_price = price
         discount_text = ""
+        emoji = emoji_map.get(name, "📋")
 
         if user_id:
-            # Получаем скидки
-            promotions = get_active_promotions()
-            promo_discount = 0
-            for promo in promotions:
-                if promo[3] > promo_discount:
-                    promo_discount = promo[3]
+            # Получаем скидку для этой конкретной услуги
+            discount, discount_name = get_service_discount(s_id, user_id)
 
-            discount, _ = get_pending_discount(user_id)
-            final_discount = max(promo_discount, discount)
-
-            if final_discount > 0:
-                new_price = max(1, round(price * (1 - final_discount / 100)))
+            if discount > 0:
+                new_price = max(1, round(price * (1 - discount / 100)))
                 display_price = new_price
-                discount_text = f" 🔥-{final_discount}%"
+                discount_text = f" 🔥-{discount}%"
 
         builder.button(
-            text=f"📝 {name} (от {display_price}₽){discount_text}",
+            text=f"{emoji} {name} (от {display_price}₽){discount_text}",
             callback_data=f"buyservice_{s_id}"
         )
 
@@ -1312,6 +1364,7 @@ class UserBirthdayState(StatesGroup):
 
 class AdminPromotionCreateState(StatesGroup):
     waiting_for_name = State()
+    waiting_for_service = State()
     waiting_for_description = State()
     waiting_for_discount = State()
     waiting_for_valid_until = State()
@@ -1508,7 +1561,8 @@ async def cmd_broadcast(message: Message, state: FSMContext):
             logging.debug(f"Не удалось отправить рассылку {uid[0]}: {e}")
     await run_db(add_admin_log, message.from_user.id, "broadcast",
                  f"Отправил рассылку {sent} пользователям ({failed} неудачно)")
-    await message.answer(f"✅ Рассылка выполнена. Отправлено {sent} пользователям, не доставлено {failed}.", parse_mode="HTML")
+    await message.answer(f"✅ Рассылка выполнена. Отправлено {sent} пользователям, не доставлено {failed}.",
+                         parse_mode="HTML")
 
 
 # ===================== АКЦИИ (ДЛЯ ПОЛЬЗОВАТЕЛЕЙ) =====================
@@ -1541,10 +1595,11 @@ async def cb_promotions(callback: CallbackQuery):
     text = "<b>🎉 Активные акции и спецпредложения</b>\n\n<i>Все акции автоматически применяются при оформлении заказа.</i>\n\n"
 
     for promo in promotions:
-        promo_id, name, description, discount, valid_until = promo
+        promo_id, name, description, discount, valid_until, service_id = promo
         valid_date = datetime.fromisoformat(valid_until).strftime("%d.%m.%Y")
+        service_text = " (все услуги)" if service_id == 0 else ""
         text += f"""
-<b>🏷️ {escape_html(name)}</b>
+<b>🏷️ {escape_html(name)}</b>{service_text}
 📝 {escape_html(description)}
 🎯 Скидка: <b>{discount}%</b>
 📅 Действует до: {valid_date}
@@ -1782,10 +1837,11 @@ async def cb_admin_promotions(callback: CallbackQuery):
     text = "<b>🎉 Управление акциями</b>\n\n"
     if promotions:
         for promo in promotions:
-            promo_id, name, description, discount, valid_until, is_active, created_at = promo
+            promo_id, name, description, discount, valid_until, is_active, created_at, service_id = promo
             status_icon = "🟢" if is_active else "🔴"
             valid_date = datetime.fromisoformat(valid_until).strftime("%d.%m.%Y") if valid_until else "∞"
-            text += f"{status_icon} <b>{escape_html(name)}</b> - {discount}% (до {valid_date})\n"
+            service_text = " (все услуги)" if service_id == 0 else f" (ID услуги: {service_id})"
+            text += f"{status_icon} <b>{escape_html(name)}</b> - {discount}%{service_text} до {valid_date}\n"
             text += f"   ID: {promo_id}\n"
     else:
         text += "Нет созданных акций.\n"
@@ -1827,11 +1883,56 @@ async def process_promotion_name(message: Message, state: FSMContext):
         return
 
     await state.update_data(name=message.text.strip())
-    await message.answer(
-        "📝 Введите <b>описание</b> акции (например: Скидка на все услуги в честь праздника!):",
+
+    # Показываем список услуг для выбора
+    services = await run_db(get_all_services)
+    text = "📝 <b>Выберите услугу для акции:</b>\n\n"
+
+    keyboard = InlineKeyboardBuilder()
+    keyboard.button(text="🌍 На все услуги", callback_data="promotion_service_0")
+
+    emoji_map = {
+        "Курсовая работа": "📝",
+        "Школьный проект": "🏫",
+        "Отчёт по практике": "📊",
+        "Доклад": "🎤",
+        "Презентация": "📽️",
+        "Защитное слово": "🛡️",
+        "Реферат": "📚",
+        "Редактирование работы": "✏️",
+    }
+
+    for s_id, name, desc, price, is_active in services:
+        if is_active:
+            emoji = emoji_map.get(name, "📋")
+            keyboard.button(text=f"{emoji} {name}", callback_data=f"promotion_service_{s_id}")
+
+    keyboard.button(text="🔙 Отмена", callback_data="admin_menu")
+    keyboard.adjust(1)
+
+    await message.answer(text, reply_markup=keyboard.as_markup(), parse_mode="HTML")
+    await state.set_state(AdminPromotionCreateState.waiting_for_service)
+
+
+@dp.callback_query(F.data.startswith("promotion_service_"))
+async def cb_promotion_service(callback: CallbackQuery, state: FSMContext):
+    service_id = int(callback.data.split("_")[2])
+    service_name = "все услуги"
+
+    if service_id > 0:
+        service = await run_db(get_service, service_id)
+        if service:
+            service_name = service[1]
+
+    await state.update_data(service_id=service_id, service_name=service_name)
+
+    await callback.message.edit_text(
+        f"✅ Выбрано: <b>{service_name}</b>\n\n"
+        f"📝 Введите <b>описание</b> акции (например: Скидка на курсовые работы в честь праздника!):",
         parse_mode="HTML"
     )
     await state.set_state(AdminPromotionCreateState.waiting_for_description)
+    await callback.answer()
 
 
 @dp.message(AdminPromotionCreateState.waiting_for_description)
@@ -1903,23 +2004,27 @@ async def process_promotion_valid_until(message: Message, state: FSMContext):
         data['name'],
         data['description'],
         data['discount'],
-        valid_until
+        valid_until,
+        data.get('service_id', 0)
     )
 
     await run_db(add_admin_log, message.from_user.id, "create_promotion",
-                 f"Создал акцию {data['name']} ({data['discount']}%)")
+                 f"Создал акцию {data['name']} ({data['discount']}%) для {data.get('service_name', 'всех услуг')}")
 
     valid_text = "бесконечно" if valid_until == (
-        datetime.now() + timedelta(days=365 * 100)).isoformat() else datetime.fromisoformat(
+                datetime.now() + timedelta(days=365 * 100)).isoformat() else datetime.fromisoformat(
         valid_until).strftime("%d.%m.%Y")
+
+    service_text = "всем услугам" if data.get('service_id', 0) == 0 else data.get('service_name', 'всем услугам')
 
     await message.answer(
         f"✅ <b>Акция создана!</b>\n\n"
         f"📌 Название: {escape_html(data['name'])}\n"
         f"📝 Описание: {escape_html(data['description'])}\n"
         f"🎯 Скидка: <b>{data['discount']}%</b>\n"
-        f"📅 Действует до: <b>{valid_text}</b>\n\n"
-        f"Акция автоматически активна и будет применяться к заказам.",
+        f"📅 Действует до: <b>{valid_text}</b>\n"
+        f"🎯 Применяется к: <b>{service_text}</b>\n\n"
+        f"Акция автоматически активна!",
         reply_markup=admin_menu_keyboard(),
         parse_mode="HTML"
     )
@@ -1986,6 +2091,8 @@ async def process_promotion_id(message: Message, state: FSMContext):
     current_state = await state.get_state()
     if current_state and "Service" in current_state:
         return
+    if current_state and "AdminPromotionCreateState" in current_state:
+        return
 
     try:
         promo_id = int(message.text.strip())
@@ -1998,8 +2105,9 @@ async def process_promotion_id(message: Message, state: FSMContext):
         await message.answer(f"❌ Акция с ID {promo_id} не найдена.", parse_mode="HTML")
         return
 
-    promo_id, name, description, discount, valid_until, is_active = promo
+    promo_id, name, description, discount, valid_until, is_active, service_id = promo
     status_text = "🟢 активна" if is_active else "🔴 неактивна"
+    service_text = "все услуги" if service_id == 0 else f"услуга ID {service_id}"
 
     keyboard = InlineKeyboardBuilder()
     keyboard.button(text="✅ Активировать", callback_data=f"promotion_do_activate_{promo_id}")
@@ -2012,11 +2120,13 @@ async def process_promotion_id(message: Message, state: FSMContext):
         f"<b>📋 Управление акцией:</b>\n\n"
         f"📌 Название: {escape_html(name)}\n"
         f"🎯 Скидка: <b>{discount}%</b>\n"
+        f"🎯 Применяется к: {service_text}\n"
         f"📊 Статус: {status_text}\n\n"
         f"Выберите действие:",
         reply_markup=keyboard.as_markup(),
         parse_mode="HTML"
     )
+
 
 @dp.callback_query(F.data.startswith("promotion_do_activate_"))
 async def cb_promotion_do_activate(callback: CallbackQuery):
@@ -2362,10 +2472,10 @@ async def process_poll_expiry(message: Message, state: FSMContext):
 
     users = await run_db(get_all_users)
     text = (
-        f"🎯 <b>НОВОЕ ГОЛОСОВАНИЕ!</b>\n\n"
-        f"📋 {escape_html(data['question'])}\n\n"
-        f"Варианты:\n" + "\n".join([f"• {escape_html(opt)}" for opt in data['options']]) +
-        f"\n\n⏰ Голосование активно <b>{hours}</b> часов."
+            f"🎯 <b>НОВОЕ ГОЛОСОВАНИЕ!</b>\n\n"
+            f"📋 {escape_html(data['question'])}\n\n"
+            f"Варианты:\n" + "\n".join([f"• {escape_html(opt)}" for opt in data['options']]) +
+            f"\n\n⏰ Голосование активно <b>{hours}</b> часов."
     )
 
     sent = 0
@@ -2497,7 +2607,8 @@ async def process_promo_max_uses(message: Message, state: FSMContext):
     try:
         max_uses = int(message.text.strip())
         if max_uses <= 0:
-            await message.answer("❌ Количество использований должно быть положительным. Попробуйте снова:", parse_mode="HTML")
+            await message.answer("❌ Количество использований должно быть положительным. Попробуйте снова:",
+                                 parse_mode="HTML")
             return
         data = await state.get_data()
         code = generate_promo_code()
@@ -2890,7 +3001,8 @@ async def cb_admin_delete_old_process(message: Message, state: FSMContext):
     try:
         days = int(message.text.strip())
         if days <= 0:
-            await message.answer("❌ Количество дней должно быть положительным числом. Попробуйте снова:", parse_mode="HTML")
+            await message.answer("❌ Количество дней должно быть положительным числом. Попробуйте снова:",
+                                 parse_mode="HTML")
             return
         deleted_count = await run_db(delete_old_orders, days)
         await run_db(add_admin_log, message.from_user.id, "delete_old_orders",
@@ -2975,7 +3087,9 @@ async def cb_set_price_process(message: Message, state: FSMContext):
         await run_db(update_order_price, order_id, new_price, "")
         await run_db(add_admin_log, message.from_user.id, "set_price",
                      f"Назначил цену {new_price} руб. для заказа {order_code}")
-        await message.answer(f"✅ Цена для заказа <b>{escape_html(order_code)}</b> успешно обновлена на <b>{new_price} руб.</b>", parse_mode="HTML")
+        await message.answer(
+            f"✅ Цена для заказа <b>{escape_html(order_code)}</b> успешно обновлена на <b>{new_price} руб.</b>",
+            parse_mode="HTML")
         await state.clear()
         await send_order_detail_message(message, order_id)
     except ValueError:
@@ -3214,9 +3328,11 @@ async def show_order_detail(target, order_id: int, is_callback: bool = False):
 
     if is_callback:
         try:
-            await target.edit_text(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent), parse_mode="HTML")
+            await target.edit_text(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent),
+                                   parse_mode="HTML")
         except Exception:
-            await target.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent), parse_mode="HTML")
+            await target.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent),
+                                parse_mode="HTML")
     else:
         await target.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent), parse_mode="HTML")
 
@@ -3861,7 +3977,8 @@ async def cb_examples(callback: CallbackQuery):
     builder.button(text="🎱 План открытия бильярдной", callback_data="example_3")
     builder.button(text="🔙 Назад", callback_data="main_menu")
     builder.adjust(1)
-    await update_message(callback, "📂 <b>Примеры выполненных работ</b>\n\nВыберите работу:", builder.as_markup(), "HTML")
+    await update_message(callback, "📂 <b>Примеры выполненных работ</b>\n\nВыберите работу:", builder.as_markup(),
+                         "HTML")
     await callback.answer()
 
 
@@ -3923,7 +4040,8 @@ async def broadcast_send(message: Message, state: FSMContext):
             logging.debug(f"Не удалось отправить рассылку {uid[0]}: {e}")
     await run_db(add_admin_log, message.from_user.id, "broadcast",
                  f"Отправил рассылку {sent} пользователям ({failed} неудачно)")
-    await message.answer(f"✅ Рассылка выполнена. Отправлено {sent} пользователям, не доставлено {failed}.", parse_mode="HTML")
+    await message.answer(f"✅ Рассылка выполнена. Отправлено {sent} пользователям, не доставлено {failed}.",
+                         parse_mode="HTML")
     await state.clear()
 
 
