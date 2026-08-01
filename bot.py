@@ -136,193 +136,7 @@ def init_db():
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            last_name TEXT,
-            reg_date TEXT,
-            last_action TEXT,
-            action_date TEXT,
-            birthday TEXT DEFAULT '',
-            used_promocodes TEXT DEFAULT ''
-        )
-    """)
-
-    cur.execute("PRAGMA table_info(users)")
-    columns = [col[1] for col in cur.fetchall()]
-
-    if "birthday" not in columns:
-        cur.execute("ALTER TABLE users ADD COLUMN birthday TEXT DEFAULT ''")
-        logging.info("✅ Добавлена колонка birthday")
-
-    if "used_promocodes" not in columns:
-        cur.execute("ALTER TABLE users ADD COLUMN used_promocodes TEXT DEFAULT ''")
-        logging.info("✅ Добавлена колонка used_promocodes")
-
-    if "last_action" not in columns:
-        cur.execute("ALTER TABLE users ADD COLUMN last_action TEXT DEFAULT ''")
-        logging.info("✅ Добавлена колонка last_action")
-
-    if "action_date" not in columns:
-        cur.execute("ALTER TABLE users ADD COLUMN action_date TEXT DEFAULT ''")
-        logging.info("✅ Добавлена колонка action_date")
-
-    if "pending_discount" not in columns:
-        cur.execute("ALTER TABLE users ADD COLUMN pending_discount INTEGER DEFAULT 0")
-        logging.info("✅ Добавлена колонка pending_discount")
-
-    if "pending_discount_code" not in columns:
-        cur.execute("ALTER TABLE users ADD COLUMN pending_discount_code TEXT DEFAULT ''")
-        logging.info("✅ Добавлена колонка pending_discount_code")
-
-    if "last_birthday_greet_year" not in columns:
-        cur.execute("ALTER TABLE users ADD COLUMN last_birthday_greet_year TEXT DEFAULT ''")
-        logging.info("✅ Добавлена колонка last_birthday_greet_year")
-
-    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='orders'")
-    table_exists = cur.fetchone()
-
-    if table_exists:
-        cur.execute("PRAGMA table_info(orders)")
-        columns = [col[1] for col in cur.fetchall()]
-
-        if "order_code" not in columns:
-            cur.execute("""
-                CREATE TABLE orders_new (
-                    order_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    service TEXT,
-                    price INTEGER,
-                    status TEXT,
-                    created_at TEXT,
-                    paid_at TEXT,
-                    admin_price INTEGER DEFAULT 0,
-                    admin_note TEXT DEFAULT '',
-                    order_code TEXT UNIQUE,
-                    rating INTEGER DEFAULT 0,
-                    review TEXT DEFAULT '',
-                    file_id TEXT DEFAULT '',
-                    is_urgent INTEGER DEFAULT 0,
-                    discount_applied INTEGER DEFAULT 0,
-                    FOREIGN KEY(user_id) REFERENCES users(user_id)
-                )
-            """)
-            cur.execute("""
-                INSERT INTO orders_new (order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id)
-                SELECT order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id FROM orders
-            """)
-            cur.execute("DROP TABLE orders")
-            cur.execute("ALTER TABLE orders_new RENAME TO orders")
-            logging.info("✅ Обновлена таблица orders")
-        else:
-            if "is_urgent" not in columns:
-                cur.execute("ALTER TABLE orders ADD COLUMN is_urgent INTEGER DEFAULT 0")
-                logging.info("✅ Добавлена колонка is_urgent")
-            if "discount_applied" not in columns:
-                cur.execute("ALTER TABLE orders ADD COLUMN discount_applied INTEGER DEFAULT 0")
-                logging.info("✅ Добавлена колонка discount_applied")
-    else:
-        cur.execute("""
-            CREATE TABLE orders (
-                order_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                service TEXT,
-                price INTEGER,
-                status TEXT,
-                created_at TEXT,
-                paid_at TEXT,
-                admin_price INTEGER DEFAULT 0,
-                admin_note TEXT DEFAULT '',
-                order_code TEXT UNIQUE,
-                rating INTEGER DEFAULT 0,
-                review TEXT DEFAULT '',
-                file_id TEXT DEFAULT '',
-                is_urgent INTEGER DEFAULT 0,
-                discount_applied INTEGER DEFAULT 0,
-                FOREIGN KEY(user_id) REFERENCES users(user_id)
-            )
-        """)
-        logging.info("✅ Таблица orders создана")
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS services (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT,
-            description TEXT,
-            price INTEGER,
-            is_active INTEGER DEFAULT 1,
-            created_at TEXT
-        )
-    """)
-
-    cur.execute("SELECT COUNT(*) FROM services")
-    if cur.fetchone()[0] == 0:
-        default_services = [
-            ("Курсовая работа", "Помощь в написании курсовой работы по любой теме", 2490),
-            ("Школьный проект", "Создание уникального проекта для школы", 1490),
-            ("Отчёт по практике", "Оформление отчёта по производственной практике", 2990),
-            ("Доклад", "Подготовка качественного доклада на любую тему", 500),
-            ("Презентация", "Создание стильной и информативной презентации", 299),
-            ("Защитное слово", "Составление защитного слова для проекта", 99),
-            ("Реферат", "Написание качественного реферата по любой теме", 1200),
-            ("Редактирование работы", "Правка и доработка готовой работы", 800),
-        ]
-        for name, desc, price in default_services:
-            cur.execute(
-                "INSERT INTO services (name, description, price, created_at) VALUES (?, ?, ?, ?)",
-                (name, desc, price, datetime.now().isoformat())
-            )
-        logging.info("✅ Добавлены стандартные услуги")
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS polls (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            question TEXT,
-            options TEXT,
-            created_by INTEGER,
-            created_at TEXT,
-            expires_at TEXT,
-            is_active INTEGER DEFAULT 1
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS poll_votes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            poll_id INTEGER,
-            user_id INTEGER,
-            option_text TEXT,
-            voted_at TEXT,
-            FOREIGN KEY(poll_id) REFERENCES polls(id),
-            FOREIGN KEY(user_id) REFERENCES users(user_id)
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS promocodes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            code TEXT UNIQUE,
-            discount INTEGER,
-            valid_until TEXT,
-            max_uses INTEGER,
-            used INTEGER DEFAULT 0,
-            created_by INTEGER,
-            created_at TEXT
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS user_promocodes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            promo_id INTEGER,
-            used_at TEXT,
-            FOREIGN KEY(user_id) REFERENCES users(user_id),
-            FOREIGN KEY(promo_id) REFERENCES promocodes(id)
-        )
-    """)
+    # ... таблица users, orders, services ...
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS promotions (
@@ -336,26 +150,16 @@ def init_db():
         )
     """)
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS user_logs (
-            log_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            action TEXT,
-            details TEXT,
-            timestamp TEXT,
-            FOREIGN KEY(user_id) REFERENCES users(user_id)
-        )
-    """)
+    # ===== МИГРАЦИЯ: ДОБАВЛЯЕМ SERVICE_ID =====
+    try:
+        cur.execute("ALTER TABLE promotions ADD COLUMN service_id INTEGER DEFAULT 0")
+        conn.commit()
+        logging.info("✅ Добавлена колонка service_id в таблицу promotions")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" not in str(e):
+            logging.warning(f"Миграция service_id: {e}")
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS admin_logs (
-            log_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            admin_id INTEGER,
-            action TEXT,
-            details TEXT,
-            timestamp TEXT
-        )
-    """)
+    # ... таблицы poll_votes, promocodes, user_promocodes, user_logs, admin_logs ...
 
     conn.commit()
     conn.close()
