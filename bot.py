@@ -2197,30 +2197,51 @@ async def cb_promotion_delete(callback: CallbackQuery):
     await callback.answer()
 
 
-# ===================== FIXED: ОБРАБОТЧИК ДЛЯ ВВОДА ID АКЦИЙ =====================
+# ===================== ОБРАБОТЧИК ДЛЯ ЦИФРОВЫХ СООБЩЕНИЙ (ТОЛЬКО ДЛЯ АКЦИЙ) =====================
 @dp.message(F.text & F.text.isdigit())
 async def process_promotion_id(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
-    if await state.get_state() is not None:
-        return  # Пропускаем, если мы в любом FSM-состоянии
 
     current_state = await state.get_state()
 
-    # FIXED: Пропускаем все состояния, где ожидается ввод числа
-    if current_state in [
+    # 🔥 КРИТИЧЕСКИ ВАЖНО: ПРОВЕРЯЕМ ВСЕ FSM-СОСТОЯНИЯ
+    fsm_states = [
         "AdminSetPriceState:waiting_for_price",
         "AdminDeleteOldState:waiting_for_days",
         "AdminServiceAddState:waiting_for_price",
+        "AdminServiceAddState:waiting_for_name",
+        "AdminServiceAddState:waiting_for_description",
         "AdminServiceEditState:waiting_for_price",
+        "AdminServiceEditState:waiting_for_name",
+        "AdminServiceEditState:waiting_for_description",
         "AdminPromocodeCreateState:waiting_for_discount",
         "AdminPromocodeCreateState:waiting_for_max_uses",
+        "AdminPromocodeCreateState:waiting_for_valid_until",
         "AdminPollCreateState:waiting_for_expiry",
-        "AdminPromotionCreateState:waiting_for_discount"
-    ]:
+        "AdminPromotionCreateState:waiting_for_discount",
+        "AdminPromotionCreateState:waiting_for_valid_until",
+        "AdminPromotionCreateState:waiting_for_name",
+        "AdminPromotionCreateState:waiting_for_description",
+        "AdminPromotionCreateState:waiting_for_service",
+        "UserPromocodeState:waiting_for_code",
+        "UserBirthdayState:waiting_for_birthday",
+        "ReviewState:waiting_for_rating",
+        "ReviewState:waiting_for_review",
+        "SupportState:waiting_for_message",
+        "AdminBroadcastState:waiting_for_message",
+        "AttachFileState:waiting_for_file",
+        "PremierOrderState:waiting_for_theme",
+        "PremierOrderState:waiting_for_volume",
+        "PremierOrderState:waiting_for_deadline",
+        "PremierOrderState:waiting_for_presentation",
+    ]
+
+    # ЕСЛИ МЫ В ЛЮБОМ FSM-СОСТОЯНИИ - ПРОПУСКАЕМ
+    if current_state in fsm_states:
         return
 
-    # FIXED: Проверяем, находимся ли мы в режиме редактирования услуги
+    # Если состояние начинается с AdminServiceEditState - тоже пропускаем
     if current_state and "AdminServiceEditState" in current_state:
         return
 
@@ -2256,8 +2277,6 @@ async def process_promotion_id(message: Message, state: FSMContext):
         reply_markup=keyboard.as_markup(),
         parse_mode="HTML"
     )
-
-
 @dp.callback_query(F.data.startswith("promotion_do_activate_"))
 async def cb_promotion_do_activate(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
