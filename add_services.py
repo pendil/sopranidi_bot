@@ -1,50 +1,73 @@
 import sqlite3
 import os
 from pathlib import Path
+from datetime import datetime
 
-# Находим БД
-DATA_DIR = "/persistent" if os.path.exists("/persistent") else str(Path(__file__).resolve().parent / "data")
-DB_NAME = f"{DATA_DIR}/shop_bot.db"
+print("🔍 Ищем базу данных...")
 
+# Возможные пути
+paths = [
+    "data/shop_bot.db",
+    "/persistent/shop_bot.db",
+    str(Path(__file__).resolve().parent / "data" / "shop_bot.db"),
+]
 
-def add_services():
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
+DB_NAME = None
+for p in paths:
+    if os.path.exists(p):
+        DB_NAME = p
+        print(f"✅ Найдена БД: {p}")
+        break
 
-    # Проверяем, есть ли уже такие услуги
-    cur.execute("SELECT name FROM services")
-    existing = [row[0] for row in cur.fetchall()]
+if not DB_NAME:
+    print("❌ База данных не найдена!")
+    print("   Проверьте пути:")
+    for p in paths:
+        print(f"   - {p}")
+    exit()
 
-    new_services = [
-        ("Реферат", "Написание качественного реферата по любой теме", 1200),
-        ("Редактирование работы", "Правка и доработка готовой работы", 800),
-        ("Тотальная защита (PREMIER)",
-         "Полное сопровождение проекта: консультация, создание работы, объяснение материала, тренаж защиты и финальные правки. Гарантия оценки!",
-         3500),
-    ]
+conn = sqlite3.connect(DB_NAME)
+cur = conn.cursor()
 
-    added = 0
-    for name, desc, price in new_services:
-        if name not in existing:
-            cur.execute(
-                "INSERT INTO services (name, description, price, created_at) VALUES (?, ?, ?, ?)",
-                (name, desc, price, datetime.now().isoformat())
-            )
-            print(f"✅ Добавлена услуга: {name} ({price}₽)")
-            added += 1
-        else:
-            print(f"⏩ Услуга уже существует: {name}")
+print("\n📊 Текущие услуги в БД:")
+cur.execute("SELECT id, name, price FROM services")
+rows = cur.fetchall()
+for row in rows:
+    print(f"   {row[0]}. {row[1]} - {row[2]} ₽")
 
-    conn.commit()
-    conn.close()
+print("\n🔄 Добавляем новые услуги...")
 
-    if added == 0:
-        print("ℹ️ Все услуги уже добавлены.")
+new_services = [
+    ("Реферат", "Написание качественного реферата по любой теме", 1200),
+    ("Редактирование работы", "Правка и доработка готовой работы", 800),
+    ("Тотальная защита (PREMIER)", "Полное сопровождение проекта: консультация, создание работы, объяснение материала, тренаж защиты и финальные правки. Гарантия оценки!", 3500),
+]
+
+added = 0
+for name, desc, price in new_services:
+    cur.execute("SELECT id FROM services WHERE name = ?", (name,))
+    if cur.fetchone():
+        print(f"   ⏩ Услуга уже существует: {name}")
     else:
-        print(f"✅ Добавлено {added} новых услуг. Перезапустите бота!")
+        cur.execute(
+            "INSERT INTO services (name, description, price, created_at) VALUES (?, ?, ?, ?)",
+            (name, desc, price, datetime.now().isoformat())
+        )
+        print(f"   ✅ Добавлена: {name} ({price}₽)")
+        added += 1
 
+conn.commit()
 
-if __name__ == "__main__":
-    from datetime import datetime
+print("\n📊 Проверка: услуги после добавления")
+cur.execute("SELECT id, name, price FROM services")
+for row in cur.fetchall():
+    print(f"   {row[0]}. {row[1]} - {row[2]} ₽")
 
-    add_services()
+conn.close()
+
+if added > 0:
+    print(f"\n✅ Добавлено {added} новых услуг!")
+    print("🔄 Перезапустите бота, чтобы изменения вступили в силу.")
+else:
+    print("\nℹ️ Новых услуг не добавлено (все уже есть).")
+    print("   Если услуги не отображаются — проверьте код бота.")

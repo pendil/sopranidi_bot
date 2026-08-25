@@ -3756,39 +3756,9 @@ async def cb_download_file(callback: CallbackQuery):
 # ===================== ПОКУПКА (ВЫБОР УСЛУГИ) =====================
 @dp.callback_query(F.data == "buy")
 async def cb_buy(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    await run_db(update_user_action, user_id, "buy")
-    await run_db(add_user_log, user_id, "buy", "Открыл выбор услуг")
     services = await run_db(get_all_services)
-
-    # Получаем скидки для пользователя
-    promotions = await run_db(get_active_promotions)
-    promo_discount = 0
-    promo_name = ""
-    for promo in promotions:
-        if promo[3] > promo_discount:
-            promo_discount = promo[3]
-            promo_name = promo[1]
-
-    discount, discount_code = await run_db(get_pending_discount, user_id)
-    final_discount = max(promo_discount, discount)
-    final_discount_name = discount_code if discount >= promo_discount else promo_name
-
-    text = """
-<b>📋 Каталог академических услуг</b>
-
-Выберите необходимый тип работы. Каждый проект создаётся индивидуально с учётом всех ваших требований и стандартов.
-
-🔐 Все ваши данные защищены и хранятся в зашифрованном виде.
-"""
-
-    if final_discount > 0:
-        text += f"\n🎉 <b>У вас активна скидка {final_discount}%</b> (акция: {final_discount_name})"
-        text += "\n<i>Цены в каталоге уже отображаются со скидкой!</i>"
-
-    await update_message(callback, text, services_keyboard_from_db(services, user_id), "HTML")
-    await callback.answer()
-
+    print("🔍 SERVICES:", services)  # ← ЭТО ВРЕМЕННО, ПОСМОТРИТЕ В ЛОГИ
+    # ... остальной код
 
 @dp.callback_query(F.data.startswith("buyservice_"))
 async def cb_service_from_db(callback: CallbackQuery, state: FSMContext):
