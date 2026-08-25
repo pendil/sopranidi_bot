@@ -1,3 +1,5 @@
+# ВАЖНО: замените ВЕСЬ ваш файл на этот исправленный код
+
 # -*- coding: utf-8 -*-
 
 import asyncio
@@ -117,14 +119,12 @@ def generate_promo_code() -> str:
 
 
 def escape_html(text: str) -> str:
-    """Экранирует специальные HTML-символы"""
     if not text:
         return ""
     return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def format_price_with_discount(original_price: int, discount: int) -> str:
-    """Форматирует цену со скидкой в HTML (безопасно)"""
     if discount <= 0:
         return f"<b>{original_price} ₽</b>"
     new_price = max(1, round(original_price * (1 - discount / 100)))
@@ -355,7 +355,6 @@ def init_db():
         )
     """)
 
-    # МИГРАЦИЯ: ДОБАВЛЯЕМ SERVICE_ID В PROMOTIONS
     try:
         cur.execute("ALTER TABLE promotions ADD COLUMN service_id INTEGER DEFAULT 0")
         conn.commit()
@@ -794,7 +793,6 @@ def get_services_keyboard(services: list) -> InlineKeyboardMarkup:
 
 # ===================== ФУНКЦИИ ДЛЯ PREMIER =====================
 def get_premier_stage_emoji(stage: str) -> str:
-    """Возвращает эмодзи для этапа"""
     stages = {
         "consultation": "🎯",
         "creation": "✍️",
@@ -806,7 +804,6 @@ def get_premier_stage_emoji(stage: str) -> str:
 
 
 def get_premier_stage_text(stage: str) -> str:
-    """Возвращает текст этапа"""
     stages = {
         "consultation": "Консультация",
         "creation": "Создание работы",
@@ -818,16 +815,12 @@ def get_premier_stage_text(stage: str) -> str:
 
 
 def get_premier_progress_bar(progress: int) -> str:
-    """Рисует красивую полосу прогресса"""
     filled = int(progress / 10)
     empty = 10 - filled
     return "█" * filled + "░" * empty
 
 
 def format_premier_progress(order: tuple) -> str:
-    """Формирует карту прогресса для PREMIER-заказа"""
-    # Определяем индексы для полей
-    # order: order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id, is_urgent, premier_stage, premier_progress
     stage = order[14] if len(order) > 14 else "consultation"
     progress = order[15] if len(order) > 15 else 0
 
@@ -866,7 +859,6 @@ def format_premier_progress(order: tuple) -> str:
     text += "└─────────────────────────────────────────┘\n"
     text += f"\n📊 Прогресс: {progress}%\n"
 
-    # Совет дня
     tips = {
         0: "💡 *Совет:* Начни с чёткого плана работы.",
         25: "💡 *Совет:* Используй схемы и таблицы — это повышает оценку.",
@@ -887,7 +879,6 @@ def format_premier_progress(order: tuple) -> str:
 
 # ===================== УПРАВЛЕНИЕ АКЦИЯМИ =====================
 def create_promotion(name: str, description: str, discount: int, valid_until: str, service_id: int = 0):
-    """Создаёт акцию. Если service_id = 0 — акция на все услуги"""
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute(
@@ -901,7 +892,6 @@ def create_promotion(name: str, description: str, discount: int, valid_until: st
 
 
 def get_active_promotions(service_id: int = 0):
-    """Получает активные акции. Если service_id указан — только для этой услуги"""
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
 
@@ -970,11 +960,9 @@ def delete_promotion(promo_id: int):
 
 
 def get_service_discount(service_id: int, user_id: int) -> tuple:
-    """Возвращает скидку для конкретной услуги (скидка, название)"""
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
 
-    # Проверяем акции на эту услугу
     cur.execute(
         "SELECT id, name, description, discount, valid_until FROM promotions "
         "WHERE is_active = 1 AND valid_until > ? AND service_id = ? "
@@ -983,7 +971,6 @@ def get_service_discount(service_id: int, user_id: int) -> tuple:
     )
     promo = cur.fetchone()
 
-    # Проверяем общие акции (service_id = 0)
     cur.execute(
         "SELECT id, name, description, discount, valid_until FROM promotions "
         "WHERE is_active = 1 AND valid_until > ? AND (service_id = 0 OR service_id IS NULL) "
@@ -994,7 +981,6 @@ def get_service_discount(service_id: int, user_id: int) -> tuple:
 
     conn.close()
 
-    # Берём максимальную скидку
     promo_discount = 0
     promo_name = ""
 
@@ -1006,7 +992,6 @@ def get_service_discount(service_id: int, user_id: int) -> tuple:
         promo_discount = general_promo[3]
         promo_name = general_promo[1]
 
-    # Проверяем промокод пользователя
     discount, discount_code = get_pending_discount(user_id)
 
     if discount > promo_discount:
@@ -1259,7 +1244,6 @@ def admin_menu_keyboard() -> InlineKeyboardMarkup:
 def services_keyboard_from_db(services: list, user_id: int = None) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
 
-    # Эмодзи для услуг
     emoji_map = {
         "Курсовая работа": "📝",
         "Школьный проект": "🏫",
@@ -1282,7 +1266,6 @@ def services_keyboard_from_db(services: list, user_id: int = None) -> InlineKeyb
         emoji = emoji_map.get(name, "📋")
 
         if user_id:
-            # Получаем скидку для этой конкретной услуги
             discount, discount_name = get_service_discount(s_id, user_id)
 
             if discount > 0:
@@ -2016,7 +1999,6 @@ async def process_promotion_name(message: Message, state: FSMContext):
 
     await state.update_data(name=message.text.strip())
 
-    # Показываем список услуг для выбора
     services = await run_db(get_all_services)
     text = "📝 <b>Выберите услугу для акции:</b>\n\n"
 
@@ -2215,20 +2197,29 @@ async def cb_promotion_delete(callback: CallbackQuery):
     await callback.answer()
 
 
+# ===================== FIXED: ОБРАБОТЧИК ДЛЯ ВВОДА ID АКЦИЙ =====================
 @dp.message(F.text & F.text.isdigit())
 async def process_promotion_id(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
 
-    # Проверяем состояние — если мы в режиме редактирования услуги, пропускаем
     current_state = await state.get_state()
-    if current_state and "Service" in current_state:
+
+    # FIXED: Пропускаем все состояния, где ожидается ввод числа
+    if current_state in [
+        "AdminSetPriceState:waiting_for_price",
+        "AdminDeleteOldState:waiting_for_days",
+        "AdminServiceAddState:waiting_for_price",
+        "AdminServiceEditState:waiting_for_price",
+        "AdminPromocodeCreateState:waiting_for_discount",
+        "AdminPromocodeCreateState:waiting_for_max_uses",
+        "AdminPollCreateState:waiting_for_expiry",
+        "AdminPromotionCreateState:waiting_for_discount"
+    ]:
         return
-    if current_state and "AdminPromotionCreateState" in current_state:
-        return
-    if current_state and "AdminSetPriceState" in current_state:
-        return
-    if current_state and "PremierOrderState" in current_state:
+
+    # FIXED: Проверяем, находимся ли мы в режиме редактирования услуги
+    if current_state and "AdminServiceEditState" in current_state:
         return
 
     try:
@@ -2488,7 +2479,7 @@ async def cb_service_add(callback: CallbackQuery, state: FSMContext):
         return
     await callback.message.edit_text(
         "➕ <b>Добавление новой услуги</b>\n\nВведите название услуги:",
-        reply_markup=back_to_main_keyboard(),
+        reply_markup=back_to_admin_keyboard(),  # FIXED: используем back_to_admin_keyboard
         parse_mode="HTML"
     )
     await state.set_state(AdminServiceAddState.waiting_for_name)
@@ -2497,18 +2488,19 @@ async def cb_service_add(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(AdminServiceAddState.waiting_for_name)
 async def process_service_add_name(message: Message, state: FSMContext):
-    await state.update_data(name=message.text)
+    await state.update_data(name=message.text.strip())
     await message.answer("📝 Введите описание услуги:", parse_mode="HTML")
     await state.set_state(AdminServiceAddState.waiting_for_description)
 
 
 @dp.message(AdminServiceAddState.waiting_for_description)
 async def process_service_add_desc(message: Message, state: FSMContext):
-    await state.update_data(description=message.text)
+    await state.update_data(description=message.text.strip())
     await message.answer("💰 Введите цену услуги (только число):", parse_mode="HTML")
     await state.set_state(AdminServiceAddState.waiting_for_price)
 
 
+# FIXED: Это самый важный исправленный обработчик для ввода цены
 @dp.message(AdminServiceAddState.waiting_for_price)
 async def process_service_add_price(message: Message, state: FSMContext):
     try:
@@ -2563,7 +2555,7 @@ async def cb_poll_create(callback: CallbackQuery, state: FSMContext):
         return
     await callback.message.edit_text(
         "🎯 <b>Создание голосования</b>\n\nВведите вопрос для голосования:",
-        reply_markup=back_to_main_keyboard(),
+        reply_markup=back_to_admin_keyboard(),
         parse_mode="HTML"
     )
     await state.set_state(AdminPollCreateState.waiting_for_question)
@@ -2572,7 +2564,7 @@ async def cb_poll_create(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(AdminPollCreateState.waiting_for_question)
 async def process_poll_question(message: Message, state: FSMContext):
-    await state.update_data(question=message.text)
+    await state.update_data(question=message.text.strip())
     await message.answer(
         "📝 Введите варианты ответов через запятую\nПример: Да, Нет, Воздержался",
         parse_mode="HTML"
@@ -2698,7 +2690,7 @@ async def cb_promocode_create(callback: CallbackQuery, state: FSMContext):
         return
     await callback.message.edit_text(
         "🏷️ <b>Создание промокода</b>\n\nВведите размер скидки в % (только число, например, 15):",
-        reply_markup=back_to_main_keyboard(),
+        reply_markup=back_to_admin_keyboard(),
         parse_mode="HTML"
     )
     await state.set_state(AdminPromocodeCreateState.waiting_for_discount)
@@ -2938,7 +2930,6 @@ async def cb_order_detail(callback: CallbackQuery):
     if admin_note:
         text += f"📌 Заметка: {escape_html(admin_note)}\n"
 
-    # Если это PREMIER-заказ, показываем карту прогресса
     if "Тотальная защита" in service and status == "paid":
         text += "\n" + format_premier_progress(order)
 
@@ -3128,7 +3119,7 @@ async def cb_admin_delete_old(callback: CallbackQuery, state: FSMContext):
 
 Введите количество дней (например, 30):
 """
-    await callback.message.edit_text(text, reply_markup=back_to_main_keyboard(), parse_mode="HTML")
+    await callback.message.edit_text(text, reply_markup=back_to_admin_keyboard(), parse_mode="HTML")
     await state.set_state(AdminDeleteOldState.waiting_for_days)
     await callback.answer()
 
@@ -3203,7 +3194,7 @@ async def cb_set_price_start(callback: CallbackQuery, state: FSMContext):
         f"💰 <b>Назначение цены для заказа {order[9] or f'#{order_id}'}</b>\n\n"
         f"Текущая цена: {order[3]} руб.\n\n"
         f"Введите новую цену (только число):",
-        reply_markup=back_to_main_keyboard(),
+        reply_markup=back_to_admin_keyboard(),
         parse_mode="HTML"
     )
     await state.set_state(AdminSetPriceState.waiting_for_price)
@@ -3274,7 +3265,6 @@ async def send_order_detail_message(message: Message, order_id: int):
     if admin_note:
         text += f"📌 Заметка: {escape_html(admin_note)}\n"
 
-    # Если это PREMIER-заказ, показываем карту прогресса
     if "Тотальная защита" in service and status == "paid":
         text += "\n" + format_premier_progress(order)
 
@@ -3471,7 +3461,6 @@ async def show_order_detail(target, order_id: int, is_callback: bool = False):
     if admin_note:
         text += f"📌 Заметка: {escape_html(admin_note)}\n"
 
-    # Если это PREMIER-заказ, показываем карту прогресса
     if "Тотальная защита" in service and status == "paid":
         text += "\n" + format_premier_progress(order)
 
@@ -3501,7 +3490,7 @@ async def cb_attach_file_start(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         f"📎 <b>Прикрепить файл к заказу {order[9] or f'#{order_id}'}</b>\n\n"
         f"Отправьте файл (PDF, DOC, DOCX, TXT, ZIP, JPG, PNG):",
-        reply_markup=back_to_main_keyboard(),
+        reply_markup=back_to_admin_keyboard(),
         parse_mode="HTML"
     )
     await state.set_state(AttachFileState.waiting_for_file)
@@ -3717,7 +3706,6 @@ async def cb_user_order_detail(callback: CallbackQuery):
     if admin_note:
         text += f"\n📌 Заметка: {escape_html(admin_note)}\n"
 
-    # Если это PREMIER-заказ, показываем карту прогресса
     if "Тотальная защита" in service and status == "paid":
         text += "\n" + format_premier_progress(order)
 
@@ -3757,8 +3745,24 @@ async def cb_download_file(callback: CallbackQuery):
 @dp.callback_query(F.data == "buy")
 async def cb_buy(callback: CallbackQuery):
     services = await run_db(get_all_services)
-    print("🔍 SERVICES:", services)  # ← ЭТО ВРЕМЕННО, ПОСМОТРИТЕ В ЛОГИ
-    # ... остальной код
+    if not services:
+        await update_message(
+            callback,
+            "📚 <b>Услуги</b>\n\nК сожалению, в данный момент услуги не доступны. Пожалуйста, свяжитесь с поддержкой.",
+            back_to_main_keyboard(),
+            "HTML"
+        )
+        await callback.answer()
+        return
+
+    await update_message(
+        callback,
+        "📚 <b>Выберите услугу:</b>",
+        services_keyboard_from_db(services, callback.from_user.id),
+        "HTML"
+    )
+    await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("buyservice_"))
 async def cb_service_from_db(callback: CallbackQuery, state: FSMContext):
@@ -3795,7 +3799,6 @@ async def cb_service_from_db(callback: CallbackQuery, state: FSMContext):
         return
 
     # Обычная услуга
-    # Получаем скидки
     promotions = await run_db(get_active_promotions)
     promo_discount = 0
     promo_name = ""
@@ -3894,7 +3897,6 @@ async def process_premier_presentation(callback: CallbackQuery, state: FSMContex
     data = await state.get_data()
     user_id = callback.from_user.id
 
-    # Формируем заявку
     text = f"""
 ✅ <b>Заявка на «Тотальную защиту (PREMIER)» оформлена!</b>
 
@@ -3917,7 +3919,6 @@ async def process_premier_presentation(callback: CallbackQuery, state: FSMContex
     await callback.message.edit_text(text, parse_mode="HTML")
     await callback.answer()
 
-    # Уведомление админам
     user = await run_db(get_user, user_id)
     for admin_id in ADMINS:
         try:
@@ -4023,7 +4024,6 @@ async def cb_confirm_order_from_db(callback: CallbackQuery, state: FSMContext):
     await update_message(callback, text, keyboard.as_markup(), "HTML")
     await callback.answer()
 
-    # Уведомление админам
     for admin_id in ADMINS:
         try:
             urgent_marker = "🔥 СРОЧНЫЙ " if is_urgent else ""
