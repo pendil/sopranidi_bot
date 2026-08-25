@@ -2202,6 +2202,8 @@ async def cb_promotion_delete(callback: CallbackQuery):
 async def process_promotion_id(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
+    if await state.get_state() is not None:
+        return  # Пропускаем, если мы в любом FSM-состоянии
 
     current_state = await state.get_state()
 
