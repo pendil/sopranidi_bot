@@ -136,8 +136,213 @@ def init_db():
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
 
-    # ... таблица users, orders, services ...
+    # Таблица пользователей
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            reg_date TEXT,
+            last_action TEXT,
+            action_date TEXT,
+            birthday TEXT DEFAULT '',
+            used_promocodes TEXT DEFAULT ''
+        )
+    """)
 
+    cur.execute("PRAGMA table_info(users)")
+    columns = [col[1] for col in cur.fetchall()]
+
+    if "birthday" not in columns:
+        cur.execute("ALTER TABLE users ADD COLUMN birthday TEXT DEFAULT ''")
+        logging.info("✅ Добавлена колонка birthday")
+
+    if "used_promocodes" not in columns:
+        cur.execute("ALTER TABLE users ADD COLUMN used_promocodes TEXT DEFAULT ''")
+        logging.info("✅ Добавлена колонка used_promocodes")
+
+    if "last_action" not in columns:
+        cur.execute("ALTER TABLE users ADD COLUMN last_action TEXT DEFAULT ''")
+        logging.info("✅ Добавлена колонка last_action")
+
+    if "action_date" not in columns:
+        cur.execute("ALTER TABLE users ADD COLUMN action_date TEXT DEFAULT ''")
+        logging.info("✅ Добавлена колонка action_date")
+
+    if "pending_discount" not in columns:
+        cur.execute("ALTER TABLE users ADD COLUMN pending_discount INTEGER DEFAULT 0")
+        logging.info("✅ Добавлена колонка pending_discount")
+
+    if "pending_discount_code" not in columns:
+        cur.execute("ALTER TABLE users ADD COLUMN pending_discount_code TEXT DEFAULT ''")
+        logging.info("✅ Добавлена колонка pending_discount_code")
+
+    if "last_birthday_greet_year" not in columns:
+        cur.execute("ALTER TABLE users ADD COLUMN last_birthday_greet_year TEXT DEFAULT ''")
+        logging.info("✅ Добавлена колонка last_birthday_greet_year")
+
+    # Таблица заказов
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='orders'")
+    table_exists = cur.fetchone()
+
+    if table_exists:
+        cur.execute("PRAGMA table_info(orders)")
+        columns = [col[1] for col in cur.fetchall()]
+
+        if "order_code" not in columns:
+            cur.execute("""
+                CREATE TABLE orders_new (
+                    order_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    service TEXT,
+                    price INTEGER,
+                    status TEXT,
+                    created_at TEXT,
+                    paid_at TEXT,
+                    admin_price INTEGER DEFAULT 0,
+                    admin_note TEXT DEFAULT '',
+                    order_code TEXT UNIQUE,
+                    rating INTEGER DEFAULT 0,
+                    review TEXT DEFAULT '',
+                    file_id TEXT DEFAULT '',
+                    is_urgent INTEGER DEFAULT 0,
+                    discount_applied INTEGER DEFAULT 0,
+                    premier_stage TEXT DEFAULT 'consultation',
+                    premier_progress INTEGER DEFAULT 0,
+                    FOREIGN KEY(user_id) REFERENCES users(user_id)
+                )
+            """)
+            cur.execute("""
+                INSERT INTO orders_new (order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id)
+                SELECT order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id FROM orders
+            """)
+            cur.execute("DROP TABLE orders")
+            cur.execute("ALTER TABLE orders_new RENAME TO orders")
+            logging.info("✅ Обновлена таблица orders")
+        else:
+            if "is_urgent" not in columns:
+                cur.execute("ALTER TABLE orders ADD COLUMN is_urgent INTEGER DEFAULT 0")
+                logging.info("✅ Добавлена колонка is_urgent")
+            if "discount_applied" not in columns:
+                cur.execute("ALTER TABLE orders ADD COLUMN discount_applied INTEGER DEFAULT 0")
+                logging.info("✅ Добавлена колонка discount_applied")
+            if "premier_stage" not in columns:
+                cur.execute("ALTER TABLE orders ADD COLUMN premier_stage TEXT DEFAULT 'consultation'")
+                logging.info("✅ Добавлена колонка premier_stage")
+            if "premier_progress" not in columns:
+                cur.execute("ALTER TABLE orders ADD COLUMN premier_progress INTEGER DEFAULT 0")
+                logging.info("✅ Добавлена колонка premier_progress")
+    else:
+        cur.execute("""
+            CREATE TABLE orders (
+                order_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                service TEXT,
+                price INTEGER,
+                status TEXT,
+                created_at TEXT,
+                paid_at TEXT,
+                admin_price INTEGER DEFAULT 0,
+                admin_note TEXT DEFAULT '',
+                order_code TEXT UNIQUE,
+                rating INTEGER DEFAULT 0,
+                review TEXT DEFAULT '',
+                file_id TEXT DEFAULT '',
+                is_urgent INTEGER DEFAULT 0,
+                discount_applied INTEGER DEFAULT 0,
+                premier_stage TEXT DEFAULT 'consultation',
+                premier_progress INTEGER DEFAULT 0,
+                FOREIGN KEY(user_id) REFERENCES users(user_id)
+            )
+        """)
+        logging.info("✅ Таблица orders создана")
+
+    # Услуги
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS services (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            description TEXT,
+            price INTEGER,
+            is_active INTEGER DEFAULT 1,
+            created_at TEXT
+        )
+    """)
+
+    cur.execute("SELECT COUNT(*) FROM services")
+    if cur.fetchone()[0] == 0:
+        default_services = [
+            ("Курсовая работа", "Помощь в написании курсовой работы по любой теме", 2490),
+            ("Школьный проект", "Создание уникального проекта для школы", 1490),
+            ("Отчёт по практике", "Оформление отчёта по производственной практике", 2990),
+            ("Доклад", "Подготовка качественного доклада на любую тему", 500),
+            ("Презентация", "Создание стильной и информативной презентации", 299),
+            ("Защитное слово", "Составление защитного слова для проекта", 99),
+            ("Реферат", "Написание качественного реферата по любой теме", 1200),
+            ("Редактирование работы", "Правка и доработка готовой работы", 800),
+            ("Тотальная защита (PREMIER)",
+             "Полное сопровождение проекта: консультация, создание работы, объяснение материала, тренаж защиты и финальные правки. Гарантия оценки!",
+             3500),
+        ]
+        for name, desc, price in default_services:
+            cur.execute(
+                "INSERT INTO services (name, description, price, created_at) VALUES (?, ?, ?, ?)",
+                (name, desc, price, datetime.now().isoformat())
+            )
+        logging.info("✅ Добавлены стандартные услуги")
+
+    # Голосования
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS polls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            question TEXT,
+            options TEXT,
+            created_by INTEGER,
+            created_at TEXT,
+            expires_at TEXT,
+            is_active INTEGER DEFAULT 1
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS poll_votes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            poll_id INTEGER,
+            user_id INTEGER,
+            option_text TEXT,
+            voted_at TEXT,
+            FOREIGN KEY(poll_id) REFERENCES polls(id),
+            FOREIGN KEY(user_id) REFERENCES users(user_id)
+        )
+    """)
+
+    # Промокоды
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS promocodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT UNIQUE,
+            discount INTEGER,
+            valid_until TEXT,
+            max_uses INTEGER,
+            used INTEGER DEFAULT 0,
+            created_by INTEGER,
+            created_at TEXT
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_promocodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            promo_id INTEGER,
+            used_at TEXT,
+            FOREIGN KEY(user_id) REFERENCES users(user_id),
+            FOREIGN KEY(promo_id) REFERENCES promocodes(id)
+        )
+    """)
+
+    # Акции
     cur.execute("""
         CREATE TABLE IF NOT EXISTS promotions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -150,7 +355,7 @@ def init_db():
         )
     """)
 
-    # ===== МИГРАЦИЯ: ДОБАВЛЯЕМ SERVICE_ID =====
+    # МИГРАЦИЯ: ДОБАВЛЯЕМ SERVICE_ID В PROMOTIONS
     try:
         cur.execute("ALTER TABLE promotions ADD COLUMN service_id INTEGER DEFAULT 0")
         conn.commit()
@@ -159,56 +364,31 @@ def init_db():
         if "duplicate column name" not in str(e):
             logging.warning(f"Миграция service_id: {e}")
 
-    # ... таблицы poll_votes, promocodes, user_promocodes, user_logs, admin_logs ...
+    # Логи
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_logs (
+            log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            action TEXT,
+            details TEXT,
+            timestamp TEXT,
+            FOREIGN KEY(user_id) REFERENCES users(user_id)
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS admin_logs (
+            log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            admin_id INTEGER,
+            action TEXT,
+            details TEXT,
+            timestamp TEXT
+        )
+    """)
 
     conn.commit()
     conn.close()
     logging.info("✅ База данных проверена/создана!")
-
-
-def get_service_discount(service_id: int, user_id: int) -> tuple:
-    """Возвращает скидку для конкретной услуги (скидка, название)"""
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-
-    # Проверяем акции на эту услугу
-    cur.execute(
-        "SELECT id, name, description, discount, valid_until FROM promotions "
-        "WHERE is_active = 1 AND valid_until > ? AND service_id = ? "
-        "ORDER BY discount DESC LIMIT 1",
-        (datetime.now().isoformat(), service_id)
-    )
-    promo = cur.fetchone()
-
-    # Проверяем общие акции (service_id = 0)
-    cur.execute(
-        "SELECT id, name, description, discount, valid_until FROM promotions "
-        "WHERE is_active = 1 AND valid_until > ? AND (service_id = 0 OR service_id IS NULL) "
-        "ORDER BY discount DESC LIMIT 1",
-        (datetime.now().isoformat(),)
-    )
-    general_promo = cur.fetchone()
-
-    conn.close()
-
-    # Берём максимальную скидку
-    promo_discount = 0
-    promo_name = ""
-
-    if promo and promo[3] > promo_discount:
-        promo_discount = promo[3]
-        promo_name = promo[1]
-
-    if general_promo and general_promo[3] > promo_discount:
-        promo_discount = general_promo[3]
-        promo_name = general_promo[1]
-
-    # Проверяем промокод пользователя
-    discount, discount_code = get_pending_discount(user_id)
-
-    if discount > promo_discount:
-        return discount, discount_code
-    return promo_discount, promo_name
 
 
 # ===================== ФУНКЦИИ РАБОТЫ С БАЗОЙ =====================
@@ -426,7 +606,7 @@ def get_order(order_id: int):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute("""
-        SELECT order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id, is_urgent
+        SELECT order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id, is_urgent, premier_stage, premier_progress
         FROM orders WHERE order_id = ?
     """, (order_id,))
     row = cur.fetchone()
@@ -438,7 +618,7 @@ def get_user_orders(user_id: int):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute(
-        "SELECT order_id, service, price, status, created_at, admin_price, order_code, rating, review, is_urgent FROM orders WHERE user_id = ? ORDER BY created_at DESC",
+        "SELECT order_id, service, price, status, created_at, admin_price, order_code, rating, review, is_urgent, premier_stage, premier_progress FROM orders WHERE user_id = ? ORDER BY created_at DESC",
         (user_id,)
     )
     rows = cur.fetchall()
@@ -450,7 +630,7 @@ def get_all_orders():
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute("""
-        SELECT o.order_id, o.user_id, u.username, o.service, o.price, o.status, o.created_at, o.paid_at, o.admin_price, o.admin_note, o.order_code, o.rating, o.review, o.is_urgent
+        SELECT o.order_id, o.user_id, u.username, o.service, o.price, o.status, o.created_at, o.paid_at, o.admin_price, o.admin_note, o.order_code, o.rating, o.review, o.is_urgent, o.premier_stage, o.premier_progress
         FROM orders o
         LEFT JOIN users u ON o.user_id = u.user_id
         ORDER BY o.created_at DESC
@@ -612,6 +792,99 @@ def get_services_keyboard(services: list) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+# ===================== ФУНКЦИИ ДЛЯ PREMIER =====================
+def get_premier_stage_emoji(stage: str) -> str:
+    """Возвращает эмодзи для этапа"""
+    stages = {
+        "consultation": "🎯",
+        "creation": "✍️",
+        "explanation": "🧠",
+        "training": "🎤",
+        "completed": "🏆"
+    }
+    return stages.get(stage, "📌")
+
+
+def get_premier_stage_text(stage: str) -> str:
+    """Возвращает текст этапа"""
+    stages = {
+        "consultation": "Консультация",
+        "creation": "Создание работы",
+        "explanation": "Объяснение материала",
+        "training": "Тренаж защиты",
+        "completed": "Защита пройдена! 🎉"
+    }
+    return stages.get(stage, "В процессе")
+
+
+def get_premier_progress_bar(progress: int) -> str:
+    """Рисует красивую полосу прогресса"""
+    filled = int(progress / 10)
+    empty = 10 - filled
+    return "█" * filled + "░" * empty
+
+
+def format_premier_progress(order: tuple) -> str:
+    """Формирует карту прогресса для PREMIER-заказа"""
+    # Определяем индексы для полей
+    # order: order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id, is_urgent, premier_stage, premier_progress
+    stage = order[14] if len(order) > 14 else "consultation"
+    progress = order[15] if len(order) > 15 else 0
+
+    stages = ["consultation", "creation", "explanation", "training", "completed"]
+    stage_index = stages.index(stage) if stage in stages else 0
+
+    text = "🎯 *Ваш путь к защите*\n\n"
+    text += "Путь: от идеи до пятёрки 🚀\n\n"
+    text += "┌─────────────────────────────────────────┐\n"
+
+    for i, s in enumerate(stages):
+        is_completed = i < stage_index
+        is_current = i == stage_index
+        emoji = "✅" if is_completed else "⏳" if is_current else "⬜"
+        name = get_premier_stage_text(s)
+
+        if is_current and s != "completed":
+            bar = get_premier_progress_bar(progress)
+            text += f"│  {emoji} {name} ({progress}%)\n"
+            text += f"│     {bar}\n"
+        else:
+            text += f"│  {emoji} {name}\n"
+
+        if is_current and progress < 100 and s != "completed":
+            text += f"│     ⏰ Осталось: {100 - progress}%\n"
+        elif is_completed and s != "completed":
+            text += f"│     ✅ Завершено!\n"
+        elif s == "completed" and is_completed:
+            text += f"│     🏆 Ты готов на 100%!\n"
+        elif s == "completed" and not is_completed:
+            text += f"│     ➡️ Следующий шаг\n"
+
+        if i < len(stages) - 1:
+            text += "├─────────────────────────────────────────┤\n"
+
+    text += "└─────────────────────────────────────────┘\n"
+    text += f"\n📊 Прогресс: {progress}%\n"
+
+    # Совет дня
+    tips = {
+        0: "💡 *Совет:* Начни с чёткого плана работы.",
+        25: "💡 *Совет:* Используй схемы и таблицы — это повышает оценку.",
+        50: "💡 *Совет:* Повтори основные тезисы своей работы.",
+        75: "💡 *Совет:* Отработай вопросы, которые могут задать.",
+        100: "💡 *Совет:* Ты готов! Удачи на защите! 🍀"
+    }
+
+    closest_tip = 0
+    for tip_progress in [0, 25, 50, 75, 100]:
+        if progress >= tip_progress:
+            closest_tip = tip_progress
+
+    text += "\n" + tips.get(closest_tip, "💡 *Совет:* Будь уверен в себе!")
+
+    return text
+
+
 # ===================== УПРАВЛЕНИЕ АКЦИЯМИ =====================
 def create_promotion(name: str, description: str, discount: int, valid_until: str, service_id: int = 0):
     """Создаёт акцию. Если service_id = 0 — акция на все услуги"""
@@ -694,6 +967,51 @@ def delete_promotion(promo_id: int):
     cur.execute("DELETE FROM promotions WHERE id = ?", (promo_id,))
     conn.commit()
     conn.close()
+
+
+def get_service_discount(service_id: int, user_id: int) -> tuple:
+    """Возвращает скидку для конкретной услуги (скидка, название)"""
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+
+    # Проверяем акции на эту услугу
+    cur.execute(
+        "SELECT id, name, description, discount, valid_until FROM promotions "
+        "WHERE is_active = 1 AND valid_until > ? AND service_id = ? "
+        "ORDER BY discount DESC LIMIT 1",
+        (datetime.now().isoformat(), service_id)
+    )
+    promo = cur.fetchone()
+
+    # Проверяем общие акции (service_id = 0)
+    cur.execute(
+        "SELECT id, name, description, discount, valid_until FROM promotions "
+        "WHERE is_active = 1 AND valid_until > ? AND (service_id = 0 OR service_id IS NULL) "
+        "ORDER BY discount DESC LIMIT 1",
+        (datetime.now().isoformat(),)
+    )
+    general_promo = cur.fetchone()
+
+    conn.close()
+
+    # Берём максимальную скидку
+    promo_discount = 0
+    promo_name = ""
+
+    if promo and promo[3] > promo_discount:
+        promo_discount = promo[3]
+        promo_name = promo[1]
+
+    if general_promo and general_promo[3] > promo_discount:
+        promo_discount = general_promo[3]
+        promo_name = general_promo[1]
+
+    # Проверяем промокод пользователя
+    discount, discount_code = get_pending_discount(user_id)
+
+    if discount > promo_discount:
+        return discount, discount_code
+    return promo_discount, promo_name
 
 
 # ===================== ПРОМОКОДЫ =====================
@@ -866,7 +1184,8 @@ def export_orders_to_excel():
         cell.alignment = header_alignment
 
     for row_idx, order in enumerate(orders, 2):
-        order_id, user_id, username, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, is_urgent = order
+        order_id, user_id, username, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, is_urgent = order[
+            :14]
         final_price = admin_price if admin_price > 0 else price
         status_text = {
             "pending": "Ожидает оплаты",
@@ -950,6 +1269,7 @@ def services_keyboard_from_db(services: list, user_id: int = None) -> InlineKeyb
         "Защитное слово": "🛡️",
         "Реферат": "📚",
         "Редактирование работы": "✏️",
+        "Тотальная защита (PREMIER)": "🛡️",
     }
 
     for service in services:
@@ -1030,7 +1350,8 @@ def orders_keyboard(orders: list, page: int = 0) -> InlineKeyboardMarkup:
     end = start + 10
     page_orders = orders[start:end]
     for order in page_orders:
-        order_id, user_id, username, service, price, status, _, _, admin_price, _, order_code, rating, _, is_urgent = order
+        order_id, user_id, username, service, price, status, _, _, admin_price, _, order_code, rating, _, is_urgent = order[
+            :14]
         status_emoji = "✅" if status == "paid" else "⏳" if status == "pending" else "🔧" if status == "in_progress" else "❌"
         urgent = "🔥" if is_urgent else ""
         final_price = admin_price if admin_price > 0 else price
@@ -1172,6 +1493,13 @@ class AdminPromotionCreateState(StatesGroup):
     waiting_for_description = State()
     waiting_for_discount = State()
     waiting_for_valid_until = State()
+
+
+class PremierOrderState(StatesGroup):
+    waiting_for_theme = State()
+    waiting_for_volume = State()
+    waiting_for_deadline = State()
+    waiting_for_presentation = State()
 
 
 # ===================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====================
@@ -1704,6 +2032,7 @@ async def process_promotion_name(message: Message, state: FSMContext):
         "Защитное слово": "🛡️",
         "Реферат": "📚",
         "Редактирование работы": "✏️",
+        "Тотальная защита (PREMIER)": "🛡️",
     }
 
     for s_id, name, desc, price, is_active in services:
@@ -1816,7 +2145,7 @@ async def process_promotion_valid_until(message: Message, state: FSMContext):
                  f"Создал акцию {data['name']} ({data['discount']}%) для {data.get('service_name', 'всех услуг')}")
 
     valid_text = "бесконечно" if valid_until == (
-                datetime.now() + timedelta(days=365 * 100)).isoformat() else datetime.fromisoformat(
+            datetime.now() + timedelta(days=365 * 100)).isoformat() else datetime.fromisoformat(
         valid_until).strftime("%d.%m.%Y")
 
     service_text = "всем услугам" if data.get('service_id', 0) == 0 else data.get('service_name', 'всем услугам')
@@ -1896,6 +2225,10 @@ async def process_promotion_id(message: Message, state: FSMContext):
     if current_state and "Service" in current_state:
         return
     if current_state and "AdminPromotionCreateState" in current_state:
+        return
+    if current_state and "AdminSetPriceState" in current_state:
+        return
+    if current_state and "PremierOrderState" in current_state:
         return
 
     try:
@@ -2472,7 +2805,7 @@ async def cb_user_orders_detail(callback: CallbackQuery):
     else:
         text = f"📦 <b>Заказы пользователя (ID: {user_id}):</b>\n\n"
         for order in orders:
-            order_id, service, price, status, created_at, admin_price, order_code, rating, _, is_urgent = order
+            order_id, service, price, status, created_at, admin_price, order_code, rating, _, is_urgent, premier_stage, premier_progress = order
             status_text = "✅ Оплачен" if status == "paid" else "⏳ Ожидает" if status == "pending" else "🔧 В работе" if status == "in_progress" else "❌ Отменён"
             final_price = admin_price if admin_price > 0 else price
             created = datetime.fromisoformat(created_at).strftime("%d.%m.%Y")
@@ -2577,7 +2910,7 @@ async def cb_order_detail(callback: CallbackQuery):
     user = await run_db(get_user, order[1])
     user_display = f"@{user[1]}" if user and user[1] else f"ID:{order[1]}"
 
-    order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id, is_urgent = order
+    order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id, is_urgent, premier_stage, premier_progress = order
     status_text = "✅ Оплачен" if status == "paid" else "⏳ Ожидает оплаты" if status == "pending" else "🔧 В работе" if status == "in_progress" else "❌ Отменён"
     final_price = admin_price if admin_price > 0 else price
     display_code = order_code or f"#{order_id}"
@@ -2604,6 +2937,10 @@ async def cb_order_detail(callback: CallbackQuery):
         text += f"📎 Прикреплён файл: ✅\n"
     if admin_note:
         text += f"📌 Заметка: {escape_html(admin_note)}\n"
+
+    # Если это PREMIER-заказ, показываем карту прогресса
+    if "Тотальная защита" in service and status == "paid":
+        text += "\n" + format_premier_progress(order)
 
     await update_message(callback, text, order_detail_keyboard(order_id, status, is_urgent), "HTML")
     await callback.answer()
@@ -2909,7 +3246,7 @@ async def send_order_detail_message(message: Message, order_id: int):
     user = await run_db(get_user, order[1])
     user_display = f"@{user[1]}" if user and user[1] else f"ID:{order[1]}"
 
-    order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id, is_urgent = order
+    order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id, is_urgent, premier_stage, premier_progress = order
     status_text = "✅ Оплачен" if status == "paid" else "⏳ Ожидает оплаты" if status == "pending" else "🔧 В работе" if status == "in_progress" else "❌ Отменён"
     final_price = admin_price if admin_price > 0 else price
     display_code = order_code or f"#{order_id}"
@@ -2936,6 +3273,10 @@ async def send_order_detail_message(message: Message, order_id: int):
         text += f"📎 Прикреплён файл: ✅\n"
     if admin_note:
         text += f"📌 Заметка: {escape_html(admin_note)}\n"
+
+    # Если это PREMIER-заказ, показываем карту прогресса
+    if "Тотальная защита" in service and status == "paid":
+        text += "\n" + format_premier_progress(order)
 
     await message.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent), parse_mode="HTML")
 
@@ -3102,7 +3443,7 @@ async def show_order_detail(target, order_id: int, is_callback: bool = False):
     user = await run_db(get_user, order[1])
     user_display = f"@{user[1]}" if user and user[1] else f"ID:{order[1]}"
 
-    order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id, is_urgent = order
+    order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id, is_urgent, premier_stage, premier_progress = order
     status_text = "✅ Оплачен" if status == "paid" else "⏳ Ожидает оплаты" if status == "pending" else "🔧 В работе" if status == "in_progress" else "❌ Отменён"
     final_price = admin_price if admin_price > 0 else price
     display_code = order_code or f"#{order_id}"
@@ -3129,6 +3470,10 @@ async def show_order_detail(target, order_id: int, is_callback: bool = False):
         text += f"📎 Прикреплён файл: ✅\n"
     if admin_note:
         text += f"📌 Заметка: {escape_html(admin_note)}\n"
+
+    # Если это PREMIER-заказ, показываем карту прогресса
+    if "Тотальная защита" in service and status == "paid":
+        text += "\n" + format_premier_progress(order)
 
     if is_callback:
         try:
@@ -3340,7 +3685,7 @@ async def cb_user_order_detail(callback: CallbackQuery):
     if order[1] != user_id:
         await callback.answer("⛔ Это не ваш заказ", show_alert=True)
         return
-    order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id, is_urgent = order
+    order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id, is_urgent, premier_stage, premier_progress = order
     status_text = "✅ Оплачен" if status == "paid" else "⏳ Ожидает оплаты" if status == "pending" else "🔧 В работе" if status == "in_progress" else "❌ Отменён"
     final_price = admin_price if admin_price > 0 else price
     display_code = order_code or f"#{order_id}"
@@ -3371,6 +3716,11 @@ async def cb_user_order_detail(callback: CallbackQuery):
         return
     if admin_note:
         text += f"\n📌 Заметка: {escape_html(admin_note)}\n"
+
+    # Если это PREMIER-заказ, показываем карту прогресса
+    if "Тотальная защита" in service and status == "paid":
+        text += "\n" + format_premier_progress(order)
+
     await update_message(callback, text, order_user_keyboard(order_id, status), "HTML")
     await callback.answer()
 
@@ -3452,6 +3802,29 @@ async def cb_service_from_db(callback: CallbackQuery, state: FSMContext):
         await callback.answer("❌ Эта услуга временно недоступна", show_alert=True)
         return
 
+    # Если это "Тотальная защита (PREMIER)" — запускаем особый процесс
+    if "Тотальная защита" in name:
+        await state.update_data(service_id=service_id, service_name=name, service_price=price)
+
+        text = f"""
+🛡️ *{name}*
+
+{description}
+
+💰 Стоимость: от {price} ₽
+(точную цену назовёт администратор)
+
+📝 Для оформления заявки ответьте на несколько вопросов:
+
+<b>1. Какая тема вашего проекта?</b>
+Напишите кратко, о чём работа.
+"""
+        await callback.message.edit_text(text, parse_mode="HTML")
+        await state.set_state(PremierOrderState.waiting_for_theme)
+        await callback.answer()
+        return
+
+    # Обычная услуга
     # Получаем скидки
     promotions = await run_db(get_active_promotions)
     promo_discount = 0
@@ -3500,6 +3873,107 @@ async def cb_service_from_db(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+# ===================== PREMIER FSM =====================
+@dp.message(PremierOrderState.waiting_for_theme)
+async def process_premier_theme(message: Message, state: FSMContext):
+    await state.update_data(theme=message.text)
+    await message.answer(
+        "📄 <b>2. Какой объём работы требуется?</b>\n"
+        "Напишите примерное количество страниц или слов.\n"
+        "Пример: 15-20 страниц",
+        parse_mode="HTML"
+    )
+    await state.set_state(PremierOrderState.waiting_for_volume)
+
+
+@dp.message(PremierOrderState.waiting_for_volume)
+async def process_premier_volume(message: Message, state: FSMContext):
+    await state.update_data(volume=message.text)
+    await message.answer(
+        "⏰ <b>3. Когда нужна готовая работа?</b>\n"
+        "Укажите желаемую дату сдачи.\n"
+        "Пример: 25 декабря",
+        parse_mode="HTML"
+    )
+    await state.set_state(PremierOrderState.waiting_for_deadline)
+
+
+@dp.message(PremierOrderState.waiting_for_deadline)
+async def process_premier_deadline(message: Message, state: FSMContext):
+    await state.update_data(deadline=message.text)
+
+    keyboard = InlineKeyboardBuilder()
+    keyboard.button(text="✅ Да", callback_data="premier_presentation_yes")
+    keyboard.button(text="❌ Нет", callback_data="premier_presentation_no")
+    keyboard.adjust(2)
+
+    await message.answer(
+        "📊 <b>4. Нужна ли презентация?</b>\n"
+        "Выберите вариант:",
+        reply_markup=keyboard.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(PremierOrderState.waiting_for_presentation)
+
+
+@dp.callback_query(F.data.startswith("premier_presentation_"))
+async def process_premier_presentation(callback: CallbackQuery, state: FSMContext):
+    presentation = "Да" if callback.data == "premier_presentation_yes" else "Нет"
+    await state.update_data(presentation=presentation)
+
+    data = await state.get_data()
+    user_id = callback.from_user.id
+
+    # Формируем заявку
+    text = f"""
+✅ <b>Заявка на «Тотальную защиту (PREMIER)» оформлена!</b>
+
+📋 <b>Детали заявки:</b>
+🎯 Тема: {escape_html(data.get('theme'))}
+📄 Объём: {escape_html(data.get('volume'))}
+⏰ Срок: {escape_html(data.get('deadline'))}
+📊 Презентация: {presentation}
+
+💰 Стоимость: от 3 500 ₽ (уточнит администратор)
+
+📞 <b>С вами свяжется администратор для обсуждения деталей и финальной цены!</b>
+
+🎁 <b>ГАРАНТИЯ ОЦЕНКИ:</b>
+Если вы не получите оценку «отлично» (5) после прохождения всех этапов подготовки — мы вернём 50% стоимости!
+
+🔐 Ваш проект защищён и хранится в децентрализованном дата-центре.
+"""
+
+    await callback.message.edit_text(text, parse_mode="HTML")
+    await callback.answer()
+
+    # Уведомление админам
+    user = await run_db(get_user, user_id)
+    for admin_id in ADMINS:
+        try:
+            msg = f"""
+🆕 <b>НОВАЯ ЗАЯВКА НА PREMIER!</b>
+
+👤 Пользователь: @{user[1] or 'без username'} (ID: {user_id})
+🎯 Тема: {escape_html(data.get('theme'))}
+📄 Объём: {escape_html(data.get('volume'))}
+⏰ Срок: {escape_html(data.get('deadline'))}
+📊 Презентация: {presentation}
+
+💰 Цена: от 3 500 ₽
+
+📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}
+
+⚡ Свяжитесь с клиентом как можно скорее!
+"""
+            await bot.send_message(admin_id, msg, parse_mode="HTML")
+        except Exception as e:
+            logging.error(f"Ошибка уведомления админа: {e}")
+
+    await state.clear()
+
+
+# ===================== ОБЫЧНЫЙ ЗАКАЗ =====================
 @dp.callback_query(F.data.startswith("confirm_order_"))
 async def cb_confirm_order_from_db(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
@@ -3703,7 +4177,7 @@ async def cb_my_orders(callback: CallbackQuery):
         return
     text = "<b>📋 Ваши заказы:</b>\n\n"
     for order in orders:
-        order_id, service, price, status, created_at, admin_price, order_code, rating, _, is_urgent = order
+        order_id, service, price, status, created_at, admin_price, order_code, rating, _, is_urgent, premier_stage, premier_progress = order
         status_text = {"pending": "⏳ Ожидает оплаты", "paid": "✅ Оплачен", "in_progress": "🔧 В работе",
                        "cancelled": "❌ Отменён"}.get(status, status)
         final_price = admin_price if admin_price > 0 else price
@@ -3714,7 +4188,7 @@ async def cb_my_orders(callback: CallbackQuery):
         text += f"• {urgent}{escape_html(display_code)}: {escape_html(service)} - {final_price} руб. ({status_text}) [{created}] {rating_str}\n"
     builder = InlineKeyboardBuilder()
     for order in orders:
-        order_id, service, price, status, created_at, admin_price, order_code, rating, _, is_urgent = order
+        order_id, service, price, status, created_at, admin_price, order_code, rating, _, is_urgent, premier_stage, premier_progress = order
         display_code = order_code or f"#{order_id}"
         status_emoji = "✅" if status == "paid" else "⏳" if status == "pending" else "🔧" if status == "in_progress" else "❌"
         urgent = "🔥" if is_urgent else ""
