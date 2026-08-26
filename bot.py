@@ -1910,24 +1910,26 @@ async def cb_promotion_delete(callback: CallbackQuery):
 
 # ===================== ГЛАВНЫЙ ОБРАБОТЧИК ДЛЯ ВСЕХ ЦИФРОВЫХ СООБЩЕНИЙ =====================
 # ВАЖНО: этот обработчик НЕ ДОЛЖЕН перехватывать FSM-состояния!
-@dp.message(F.text & F.text.isdigit())
-async def process_promotion_id(message: Message, state: FSMContext):
-    # ПРОВЕРЯЕМ: если есть активное состояние - НЕ ОБРАБАТЫВАЕМ
-    if await state.get_state() is not None:
-        return
-
+@dp.message(Command("promo"))
+async def cmd_promo(message: Message):
+    """Команда /promo ID — управление акцией"""
     if not is_admin(message.from_user.id):
         return
 
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer("Использование: /promo ID_акции")
+        return
+
     try:
-        promo_id = int(message.text.strip())
-    except ValueError:
-        await message.answer("❌ Введите число (ID акции).", parse_mode="HTML")
+        promo_id = int(parts[1])
+    except:
+        await message.answer("❌ Введите число.")
         return
 
     promo = await run_db(get_promotion_by_id, promo_id)
     if not promo:
-        await message.answer(f"❌ Акция с ID {promo_id} не найдена.", parse_mode="HTML")
+        await message.answer(f"❌ Акция с ID {promo_id} не найдена.")
         return
 
     promo_id, name, description, discount, valid_until, is_active, service_id = promo
@@ -1942,15 +1944,84 @@ async def process_promotion_id(message: Message, state: FSMContext):
     keyboard.adjust(1)
 
     await message.answer(
-        f"<b>📋 Управление акцией:</b>\n\n"
+        f"<b>📋 Управление акцией {promo_id}</b>\n\n"
         f"📌 Название: {escape_html(name)}\n"
         f"🎯 Скидка: <b>{discount}%</b>\n"
         f"🎯 Применяется к: {service_text}\n"
-        f"📊 Статус: {status_text}\n\n"
-        f"Выберите действие:",
+        f"📊 Статус: {status_text}",
         reply_markup=keyboard.as_markup(),
         parse_mode="HTML"
     )
+
+
+@dp.message(AdminSetPriceState.waiting_for_price)
+async def cb_set_price_process(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Нет доступа.", parse_mode="HTML")
+        await state.clear()
+        return
+
+    # ПРОСТО ПЫТАЕМСЯ ПРЕОБРАЗОВАТЬ В ЧИСЛО
+    try:
+        new_price = int(message.text.strip())
+    except ValueError:
+        await message.answer("❌ Введите число. Например: 5000", parse_mode="HTML")
+        return
+
+    if new_price <= 0:
+        await message.answer("❌ Цена должна быть больше 0.", parse_mode="HTML")
+        return
+
+    data = await state.get_data()
+    order_id = data.get("order_id")
+    order = await run_db(get_order, order_id)
+    order_code = order[9] if order else f"#{order_id}"
+
+    await run_db(update_order_price, order_id, new_price, "")
+    await run_db(add_admin_log, message.from_user.id, "set_price",
+                 f"Назначил цену {new_price} руб. для заказа {order_code}")
+
+    await message.answer(
+        f"✅ Цена для заказа <b>{escape_html(order_code)}</b> обновлена на <b>{new_price} руб.</b>",
+        parse_mode="HTML"
+    )
+    await state.clear()
+    await send_order_detail_message(message, order_id)
+
+
+@dp.message(AdminSetPriceState.waiting_for_price)
+async def cb_set_price_process(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Нет доступа.", parse_mode="HTML")
+        await state.clear()
+        return
+
+    # ПРОСТО ПЫТАЕМСЯ ПРЕОБРАЗОВАТЬ В ЧИСЛО
+    try:
+        new_price = int(message.text.strip())
+    except ValueError:
+        await message.answer("❌ Введите число. Например: 5000", parse_mode="HTML")
+        return
+
+    if new_price <= 0:
+        await message.answer("❌ Цена должна быть больше 0.", parse_mode="HTML")
+        return
+
+    data = await state.get_data()
+    order_id = data.get("order_id")
+    order = await run_db(get_order, order_id)
+    order_code = order[9] if order else f"#{order_id}"
+
+    await run_db(update_order_price, order_id, new_price, "")
+    await run_db(add_admin_log, message.from_user.id, "set_price",
+                 f"Назначил цену {new_price} руб. для заказа {order_code}")
+
+    await message.answer(
+        f"✅ Цена для заказа <b>{escape_html(order_code)}</b> обновлена на <b>{new_price} руб.</b>",
+        parse_mode="HTML"
+    )
+    await state.clear()
+    await send_order_detail_message(message, order_id)
 
 @dp.callback_query(F.data.startswith("promotion_do_activate_"))
 async def cb_promotion_do_activate(callback: CallbackQuery):
