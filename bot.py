@@ -858,7 +858,15 @@ def format_premier_progress(order: tuple) -> str:
 
 # ===================== ГЕНЕРАЦИЯ СЕРТИФИКАТА =====================
 def generate_certificate(user_name: str, service_name: str, completion_date: str, order_code: str) -> BytesIO:
+    """Генерирует красивый сертификат"""
     if not PIL_AVAILABLE:
+        return None
+
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        from io import BytesIO
+    except ImportError as e:
+        logging.error(f"Ошибка импорта Pillow: {e}")
         return None
 
     width, height = 1200, 850
@@ -870,13 +878,6 @@ def generate_certificate(user_name: str, service_name: str, completion_date: str
     gold = (212, 175, 55)
     draw.rectangle([(15, 15), (width - 15, height - 15)], outline=gold, width=3)
     draw.rectangle([(35, 35), (width - 35, height - 35)], outline=(200, 200, 200), width=2)
-
-    # Фоновый градиент
-    for i in range(height):
-        color = (245 + int((255 - 245) * (i / height)),
-                 240 + int((255 - 240) * (i / height)),
-                 230 + int((255 - 230) * (i / height)))
-        draw.line([(0, i), (width, i)], fill=color, width=1)
 
     # Шрифты
     try:
@@ -893,6 +894,7 @@ def generate_certificate(user_name: str, service_name: str, completion_date: str
             small_font = ImageFont.truetype("C:/Windows/Fonts/times.ttf", 22)
             bold_font = ImageFont.truetype("C:/Windows/Fonts/timesbd.ttf", 32)
         except:
+            # Используем стандартный шрифт
             title_font = ImageFont.load_default()
             name_font = ImageFont.load_default()
             text_font = ImageFont.load_default()
