@@ -1948,8 +1948,40 @@ async def process_promotion_id(message: Message, state: FSMContext):
 
     current_state = await state.get_state()
 
-    # Пропускаем все FSM-состояния, где ожидается ввод цифр
-    if current_state is not None:
+    # ===== ПРОПУСКАЕМ ВСЕ FSM-СОСТОЯНИЯ =====
+    # Добавлено состояние AdminSetPriceState
+    if current_state in [
+        "AdminSetPriceState:waiting_for_price",           # ← ЭТО ВАЖНО!
+        "AdminSetPriceState:waiting_for_note",
+        "AdminDeleteOldState:waiting_for_days",
+        "AdminServiceAddState:waiting_for_price",
+        "AdminServiceAddState:waiting_for_name",
+        "AdminServiceAddState:waiting_for_description",
+        "AdminServiceEditState:waiting_for_price",
+        "AdminServiceEditState:waiting_for_name",
+        "AdminServiceEditState:waiting_for_description",
+        "AdminPromocodeCreateState:waiting_for_discount",
+        "AdminPromocodeCreateState:waiting_for_max_uses",
+        "AdminPromocodeCreateState:waiting_for_valid_until",
+        "AdminPollCreateState:waiting_for_expiry",
+        "AdminPromotionCreateState:waiting_for_discount",
+        "AdminPromotionCreateState:waiting_for_valid_until",
+        "AdminPromotionCreateState:waiting_for_name",
+        "AdminPromotionCreateState:waiting_for_description",
+        "AdminPromotionCreateState:waiting_for_service",
+        "UserPromocodeState:waiting_for_code",
+        "UserBirthdayState:waiting_for_birthday",
+        "ReviewState:waiting_for_rating",
+        "ReviewState:waiting_for_review",
+        "SupportState:waiting_for_message",
+        "AdminBroadcastState:waiting_for_message",
+        "AttachFileState:waiting_for_file"
+    ]:
+        # ❌ НЕ ОБРАБАТЫВАЕМ - пусть FSM обрабатывает
+        return
+
+    # Если состояние начинается с AdminServiceEditState - тоже пропускаем
+    if current_state and "AdminServiceEditState" in current_state:
         return
 
     try:
@@ -1984,7 +2016,6 @@ async def process_promotion_id(message: Message, state: FSMContext):
         reply_markup=keyboard.as_markup(),
         parse_mode="HTML"
     )
-
 
 @dp.callback_query(F.data.startswith("promotion_do_activate_"))
 async def cb_promotion_do_activate(callback: CallbackQuery):
