@@ -38,7 +38,7 @@ except ImportError:
         PIL_AVAILABLE = True
         print(f"✅ Pillow установлен и загружен! Версия: {PIL.__version__}")
     except Exception as e:
-        print(f"❌ Не удалось установить Pillow: {e}")
+        print(f"❌ Не удалось установить Pillow: {e}"cer
 
 # ===================== ДЛЯ ГЕНЕРАЦИИ СЕРТИФИКАТОВ =====================
 try:
@@ -877,9 +877,8 @@ def format_premier_progress(order: tuple) -> str:
     return text
 
 
-# ===================== ГЕНЕРАЦИЯ СЕРТИФИКАТА =====================
 def generate_certificate(user_name: str, service_name: str, completion_date: str, order_code: str) -> BytesIO:
-    """Генерирует красивый сертификат"""
+    """Генерирует стильный сертификат"""
     if not PIL_AVAILABLE:
         return None
 
@@ -890,104 +889,192 @@ def generate_certificate(user_name: str, service_name: str, completion_date: str
         logging.error(f"Ошибка импорта Pillow: {e}")
         return None
 
+    # Размер
     width, height = 1200, 850
 
+    # Создаём изображение с градиентным фоном
     img = Image.new('RGB', (width, height), (255, 255, 255))
     draw = ImageDraw.Draw(img)
 
-    # Золотая рамка
-    gold = (212, 175, 55)
-    draw.rectangle([(15, 15), (width - 15, height - 15)], outline=gold, width=3)
-    draw.rectangle([(35, 35), (width - 35, height - 35)], outline=(200, 200, 200), width=2)
+    # ===== ФОН С ГРАДИЕНТОМ =====
+    for i in range(height):
+        # Светло-кремовый градиент
+        r = 248 - int((i / height) * 15)
+        g = 245 - int((i / height) * 15)
+        b = 235 - int((i / height) * 15)
+        draw.line([(0, i), (width, i)], fill=(r, g, b), width=1)
 
-    # Шрифты
+    # ===== ДЕКОРАТИВНЫЕ ЭЛЕМЕНТЫ =====
+    gold = (212, 175, 55)  # Золотой
+    gold_light = (240, 220, 150)  # Светло-золотой
+    dark = (30, 30, 30)  # Тёмный
+    gray = (100, 100, 100)  # Серый
+
+    # Внешняя золотая рамка
+    draw.rectangle([(20, 20), (width - 20, height - 20)], outline=gold, width=4)
+
+    # Внутренняя рамка
+    draw.rectangle([(40, 40), (width - 40, height - 40)], outline=(200, 200, 200), width=2)
+
+    # Декоративные уголки
+    corner_size = 50
+    for x, y in [(40, 40), (width - 40, 40), (40, height - 40), (width - 40, height - 40)]:
+        # Левый верхний угол
+        if x == 40 and y == 40:
+            draw.line([(x, y + corner_size), (x, y), (x + corner_size, y)], fill=gold, width=3)
+        # Правый верхний
+        elif x == width - 40 and y == 40:
+            draw.line([(x, y + corner_size), (x, y), (x - corner_size, y)], fill=gold, width=3)
+        # Левый нижний
+        elif x == 40 and y == height - 40:
+            draw.line([(x, y - corner_size), (x, y), (x + corner_size, y)], fill=gold, width=3)
+        # Правый нижний
+        else:
+            draw.line([(x, y - corner_size), (x, y), (x - corner_size, y)], fill=gold, width=3)
+
+    # ===== ЗАГРУЗКА ШРИФТОВ =====
     try:
-        title_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVu-Serif-Bold.ttf", 48)
-        name_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVu-Serif-Bold.ttf", 56)
-        text_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVu-Serif.ttf", 28)
-        small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVu-Serif.ttf", 22)
-        bold_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVu-Serif-Bold.ttf", 32)
+        # Linux
+        font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVu-Serif-Bold.ttf", 52)
+        font_name = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVu-Serif-Bold.ttf", 64)
+        font_text = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVu-Serif.ttf", 30)
+        font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVu-Serif.ttf", 24)
+        font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVu-Serif-Bold.ttf", 36)
     except:
         try:
-            title_font = ImageFont.truetype("C:/Windows/Fonts/timesbd.ttf", 48)
-            name_font = ImageFont.truetype("C:/Windows/Fonts/timesbd.ttf", 56)
-            text_font = ImageFont.truetype("C:/Windows/Fonts/times.ttf", 28)
-            small_font = ImageFont.truetype("C:/Windows/Fonts/times.ttf", 22)
-            bold_font = ImageFont.truetype("C:/Windows/Fonts/timesbd.ttf", 32)
+            # Windows
+            font_title = ImageFont.truetype("C:/Windows/Fonts/timesbd.ttf", 52)
+            font_name = ImageFont.truetype("C:/Windows/Fonts/timesbd.ttf", 64)
+            font_text = ImageFont.truetype("C:/Windows/Fonts/times.ttf", 30)
+            font_small = ImageFont.truetype("C:/Windows/Fonts/times.ttf", 24)
+            font_bold = ImageFont.truetype("C:/Windows/Fonts/timesbd.ttf", 36)
         except:
-            # Используем стандартный шрифт
-            title_font = ImageFont.load_default()
-            name_font = ImageFont.load_default()
-            text_font = ImageFont.load_default()
-            small_font = ImageFont.load_default()
-            bold_font = ImageFont.load_default()
+            # Стандартный шрифт
+            font_title = ImageFont.load_default()
+            font_name = ImageFont.load_default()
+            font_text = ImageFont.load_default()
+            font_small = ImageFont.load_default()
+            font_bold = ImageFont.load_default()
 
-    # Заголовок
-    title = "🏛️ SOPRANIDI CORPORATION"
-    bbox = draw.textbbox((0, 0), title, font=title_font)
-    draw.text(((width - (bbox[2] - bbox[0])) // 2, 40), title, fill=gold, font=title_font)
+    # ===== ВЕРХНИЙ БЛОК =====
+    # Логотип (эмодзи вместо картинки)
+    logo_text = "🏛️"
+    bbox = draw.textbbox((0, 0), logo_text, font=font_title)
+    draw.text(((width - (bbox[2] - bbox[0])) // 2, 35), logo_text, fill=gold, font=font_title)
 
-    # Подзаголовок
-    subtitle = "СЕРТИФИКАТ"
-    bbox = draw.textbbox((0, 0), subtitle, font=title_font)
-    draw.text(((width - (bbox[2] - bbox[0])) // 2, 100), subtitle, fill=(50, 50, 50), font=title_font)
+    # Название компании
+    company = "SOPRANIDI CORPORATION"
+    bbox = draw.textbbox((0, 0), company, font=font_title)
+    draw.text(((width - (bbox[2] - bbox[0])) // 2, 90), company, fill=gold, font=font_title)
 
-    # Линия
-    draw.line([(200, 160), (width - 200, 160)], fill=gold, width=3)
+    # Золотая линия
+    draw.line([(250, 160), (width - 250, 160)], fill=gold, width=2)
+    draw.line([(300, 165), (width - 300, 165)], fill=gold_light, width=1)
 
-    # Текст
-    cert_text = "Настоящий сертификат подтверждает, что"
-    bbox = draw.textbbox((0, 0), cert_text, font=text_font)
-    draw.text(((width - (bbox[2] - bbox[0])) // 2, 190), cert_text, fill=(80, 80, 80), font=text_font)
+    # ===== ЗАГОЛОВОК =====
+    cert_title = "С Е Р Т И Ф И К А Т"
+    bbox = draw.textbbox((0, 0), cert_title, font=font_title)
+    draw.text(((width - (bbox[2] - bbox[0])) // 2, 185), cert_title, fill=dark, font=font_title)
 
-    # Имя
-    bbox = draw.textbbox((0, 0), user_name, font=name_font)
-    draw.text(((width - (bbox[2] - bbox[0])) // 2, 250), user_name, fill=(40, 40, 40), font=name_font)
+    # ===== ТЕКСТ =====
+    text1 = "Настоящий сертификат подтверждает, что"
+    bbox = draw.textbbox((0, 0), text1, font=font_text)
+    draw.text(((width - (bbox[2] - bbox[0])) // 2, 255), text1, fill=gray, font=font_text)
+
+    # ===== ИМЯ ПОЛЬЗОВАТЕЛЯ (КРУПНО) =====
+    display_name = user_name[:30].upper()
+    bbox = draw.textbbox((0, 0), display_name, font=font_name)
+    draw.text(((width - (bbox[2] - bbox[0])) // 2, 310), display_name, fill=dark, font=font_name)
 
     # Подпись под именем
-    draw.line([(width // 2 - 200, 330), (width // 2 + 200, 330)], fill=gold, width=2)
+    draw.line([(width // 2 - 250, 390), (width // 2 + 250, 390)], fill=gold, width=2)
 
-    # Текст
-    success = "успешно завершил(а) программу"
-    bbox = draw.textbbox((0, 0), success, font=text_font)
-    draw.text(((width - (bbox[2] - bbox[0])) // 2, 355), success, fill=(80, 80, 80), font=text_font)
+    # ===== ОСНОВНОЙ ТЕКСТ =====
+    text2 = "успешно завершил(а) программу"
+    bbox = draw.textbbox((0, 0), text2, font=font_text)
+    draw.text(((width - (bbox[2] - bbox[0])) // 2, 410), text2, fill=gray, font=font_text)
 
-    # Название услуги
-    bbox = draw.textbbox((0, 0), service_name, font=bold_font)
-    draw.text(((width - (bbox[2] - bbox[0])) // 2, 405), service_name, fill=gold, font=bold_font)
+    # ===== НАЗВАНИЕ УСЛУГИ =====
+    display_service = service_name[:50]
+    bbox = draw.textbbox((0, 0), display_service, font=font_bold)
+    draw.text(((width - (bbox[2] - bbox[0])) // 2, 460), display_service, fill=gold, font=font_bold)
 
-    # Описание
+    # ===== ОПИСАНИЕ =====
     desc = "с полным сопровождением и гарантией качества"
-    bbox = draw.textbbox((0, 0), desc, font=text_font)
-    draw.text(((width - (bbox[2] - bbox[0])) // 2, 450), desc, fill=(100, 100, 100), font=text_font)
+    bbox = draw.textbbox((0, 0), desc, font=font_text)
+    draw.text(((width - (bbox[2] - bbox[0])) // 2, 510), desc, fill=gray, font=font_text)
 
-    # Печать
-    seal = (width - 150, height - 150)
-    draw.ellipse([(seal[0] - 70, seal[1] - 70), (seal[0] + 70, seal[1] + 70)], outline=gold, width=4)
-    draw.ellipse([(seal[0] - 55, seal[1] - 55), (seal[0] + 55, seal[1] + 55)], outline=gold, width=2)
+    # ===== ЗВЁЗДОЧКИ =====
+    stars = "✦ ✧ ✦ ✧ ✦"
+    bbox = draw.textbbox((0, 0), stars, font=font_small)
+    draw.text(((width - (bbox[2] - bbox[0])) // 2, 555), stars, fill=gold_light, font=font_small)
+
+    # ===== ПЕЧАТЬ (КРУГЛАЯ) =====
+    seal_center = (width - 140, height - 140)
+    seal_radius = 65
+
+    # Внешний круг
+    draw.ellipse([
+        (seal_center[0] - seal_radius, seal_center[1] - seal_radius),
+        (seal_center[0] + seal_radius, seal_center[1] + seal_radius)
+    ], outline=gold, width=4)
+
+    # Внутренний круг
+    draw.ellipse([
+        (seal_center[0] - seal_radius + 15, seal_center[1] - seal_radius + 15),
+        (seal_center[0] + seal_radius - 15, seal_center[1] + seal_radius - 15)
+    ], outline=gold, width=2)
+
+    # Текст в печати
     seal_text = "★ SOPRANIDI ★"
-    bbox = draw.textbbox((0, 0), seal_text, font=small_font)
-    draw.text((seal[0] - (bbox[2] - bbox[0]) // 2, seal[1] - 10), seal_text, fill=gold, font=small_font)
+    bbox = draw.textbbox((0, 0), seal_text, font=font_small)
+    draw.text(
+        (seal_center[0] - (bbox[2] - bbox[0]) // 2, seal_center[1] - 12),
+        seal_text,
+        fill=gold,
+        font=font_small
+    )
 
-    # Код
+    # Звезда в центре печати
+    draw.text(
+        (seal_center[0] - 12, seal_center[1] + 10),
+        "⭐",
+        fill=gold,
+        font=font_small
+    )
+
+    # ===== ИНФОРМАЦИЯ ВНИЗУ =====
+    # Код заказа
     code_text = f"Код заказа: {order_code}"
-    bbox = draw.textbbox((0, 0), code_text, font=small_font)
-    draw.text((50, height - 70), code_text, fill=(150, 150, 150), font=small_font)
+    bbox = draw.textbbox((0, 0), code_text, font=font_small)
+    draw.text((50, height - 70), code_text, fill=gray, font=font_small)
 
     # Дата
     date_text = f"Дата выдачи: {completion_date}"
-    bbox = draw.textbbox((0, 0), date_text, font=small_font)
-    draw.text((width - (bbox[2] - bbox[0]) - 50, height - 70), date_text, fill=(150, 150, 150), font=small_font)
+    bbox = draw.textbbox((0, 0), date_text, font=font_small)
+    draw.text((width - (bbox[2] - bbox[0]) - 50, height - 70), date_text, fill=gray, font=font_small)
 
-    # Подписи
-    draw.text((180, height - 130), "___________ Диспетчер", fill=(100, 100, 100), font=small_font)
-    draw.text((width - 320, height - 130), "___________ CEO", fill=(100, 100, 100), font=small_font)
+    # ===== ПОДПИСИ =====
+    # Диспетчер
+    draw.text((200, height - 130), "___________ Диспетчер", fill=gray, font=font_small)
+    draw.text((210, height - 155), "(подпись)", fill=(180, 180, 180), font=font_small)
 
+    # CEO
+    draw.text((width - 350, height - 130), "___________ CEO", fill=gray, font=font_small)
+    draw.text((width - 340, height - 155), "(подпись)", fill=(180, 180, 180), font=font_small)
+
+    # ===== ВОДЯНОЙ ЗНАК (ЛЁГКИЙ) =====
+    watermark = "★"
+    for i in range(8):
+        x = 100 + i * 140
+        y = 650
+        draw.text((x, y), watermark, fill=(230, 230, 230), font=font_text)
+
+    # Сохраняем
     output = BytesIO()
-    img.save(output, format='PNG')
+    img.save(output, format='PNG', quality=95)
     output.seek(0)
     return output
-
 
 # ===================== УПРАВЛЕНИЕ АКЦИЯМИ =====================
 def create_promotion(name: str, description: str, discount: int, valid_until: str, service_id: int = 0):
