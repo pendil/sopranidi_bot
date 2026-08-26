@@ -2866,7 +2866,7 @@ async def cb_set_price_process(message: Message, state: FSMContext):
         await state.clear()
         await send_order_detail_message(message, order_id)
     except ValueError:
-        await message.answer("❌ Введите корректное число. Попробуйте снова:", parse_mode="HTML")ы
+        await message.answer("❌ Введите корректное число. Попробуйте снова:", parse_mode="HTML")
 
 
 # ===================== АДМИН: ОТОБРАЖЕНИЕ ДЕТАЛЕЙ ЗАКАЗА =====================
