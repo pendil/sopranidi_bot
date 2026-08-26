@@ -38,7 +38,7 @@ except ImportError:
         PIL_AVAILABLE = True
         print(f"✅ Pillow установлен и загружен! Версия: {PIL.__version__}")
     except Exception as e:
-        print(f"❌ Не удалось установить Pillow: {e}"cer
+        print(f"❌ Не удалось установить Pillow: {e}")
 
 # ===================== ДЛЯ ГЕНЕРАЦИИ СЕРТИФИКАТОВ =====================
 try:
