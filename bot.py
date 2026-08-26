@@ -21,11 +21,13 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 # ===================== ДЛЯ ГЕНЕРАЦИИ СЕРТИФИКАТОВ =====================
 try:
-    from PIL import Image, ImageDraw, ImageFont, ImageFilter
-
+    from PIL import Image, ImageDraw, ImageFont
+    from io import BytesIO
     PIL_AVAILABLE = True
-except ImportError:
+    print("✅ Pillow успешно загружен!")
+except ImportError as e:
     PIL_AVAILABLE = False
+    print(f"❌ Ошибка загрузки Pillow: {e}")
     logging.warning("⚠️ Pillow не установлен. Генерация сертификатов будет недоступна.")
 
 # ===================== ЗАГРУЗКА .ENV =====================
