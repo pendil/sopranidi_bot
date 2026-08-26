@@ -19,30 +19,6 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# ===================== PILLOW (С ПРИНУДИТЕЛЬНОЙ УСТАНОВКОЙ) =====================
-PIL_AVAILABLE = False
-
-try:
-    import PIL
-    from PIL import Image, ImageDraw, ImageFont
-
-    PIL_AVAILABLE = True
-    print(f"✅ Pillow загружен. Версия: {PIL.__version__}")
-except ImportError:
-    print("⚠️ Pillow не загружен. Пытаемся установить...")
-    import subprocess
-    import sys
-
-    try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "Pillow"])
-        import PIL
-        from PIL import Image, ImageDraw, ImageFont
-
-        PIL_AVAILABLE = True
-        print(f"✅ Pillow установлен и загружен! Версия: {PIL.__version__}")
-    except Exception as e:
-        print(f"❌ Не удалось установить Pillow: {e}")
-
 # ===================== ЗАГРУЗКА .ENV =====================
 try:
     from dotenv import load_dotenv
@@ -148,7 +124,6 @@ def init_db():
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
 
-    # Таблица пользователей
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -181,7 +156,6 @@ def init_db():
     if "last_birthday_greet_year" not in columns:
         cur.execute("ALTER TABLE users ADD COLUMN last_birthday_greet_year TEXT DEFAULT ''")
 
-    # Таблица заказов
     cur.execute("""
         CREATE TABLE IF NOT EXISTS orders (
             order_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -198,12 +172,10 @@ def init_db():
             review TEXT DEFAULT '',
             file_id TEXT DEFAULT '',
             is_urgent INTEGER DEFAULT 0,
-            discount_applied INTEGER DEFAULT 0,
-            FOREIGN KEY(user_id) REFERENCES users(user_id)
+            discount_applied INTEGER DEFAULT 0
         )
     """)
 
-    # Услуги
     cur.execute("""
         CREATE TABLE IF NOT EXISTS services (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -236,7 +208,6 @@ def init_db():
                 (name, desc, price, datetime.now().isoformat())
             )
 
-    # Голосования
     cur.execute("""
         CREATE TABLE IF NOT EXISTS polls (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -261,7 +232,6 @@ def init_db():
         )
     """)
 
-    # Промокоды
     cur.execute("""
         CREATE TABLE IF NOT EXISTS promocodes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -286,7 +256,6 @@ def init_db():
         )
     """)
 
-    # Акции
     cur.execute("""
         CREATE TABLE IF NOT EXISTS promotions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -300,7 +269,6 @@ def init_db():
         )
     """)
 
-    # Логи
     cur.execute("""
         CREATE TABLE IF NOT EXISTS user_logs (
             log_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1940,48 +1908,19 @@ async def cb_promotion_delete(callback: CallbackQuery):
     await callback.answer()
 
 
-# ===================== ИСПРАВЛЕННЫЙ ОБРАБОТЧИК ДЛЯ ЦИФР =====================
+# ===================== ГЛАВНЫЙ ОБРАБОТЧИК ДЛЯ ВСЕХ ЦИФРОВЫХ СООБЩЕНИЙ =====================
+# ВАЖНО: этот обработчик НЕ ДОЛЖЕН перехватывать FSM-состояния!
 @dp.message(F.text & F.text.isdigit())
 async def process_promotion_id(message: Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        return
-
+    # Проверяем, есть ли активное FSM-состояние
     current_state = await state.get_state()
 
-    # ===== ПРОПУСКАЕМ ВСЕ FSM-СОСТОЯНИЯ =====
-    # Добавлено состояние AdminSetPriceState
-    if current_state in [
-        "AdminSetPriceState:waiting_for_price",           # ← ЭТО ВАЖНО!
-        "AdminSetPriceState:waiting_for_note",
-        "AdminDeleteOldState:waiting_for_days",
-        "AdminServiceAddState:waiting_for_price",
-        "AdminServiceAddState:waiting_for_name",
-        "AdminServiceAddState:waiting_for_description",
-        "AdminServiceEditState:waiting_for_price",
-        "AdminServiceEditState:waiting_for_name",
-        "AdminServiceEditState:waiting_for_description",
-        "AdminPromocodeCreateState:waiting_for_discount",
-        "AdminPromocodeCreateState:waiting_for_max_uses",
-        "AdminPromocodeCreateState:waiting_for_valid_until",
-        "AdminPollCreateState:waiting_for_expiry",
-        "AdminPromotionCreateState:waiting_for_discount",
-        "AdminPromotionCreateState:waiting_for_valid_until",
-        "AdminPromotionCreateState:waiting_for_name",
-        "AdminPromotionCreateState:waiting_for_description",
-        "AdminPromotionCreateState:waiting_for_service",
-        "UserPromocodeState:waiting_for_code",
-        "UserBirthdayState:waiting_for_birthday",
-        "ReviewState:waiting_for_rating",
-        "ReviewState:waiting_for_review",
-        "SupportState:waiting_for_message",
-        "AdminBroadcastState:waiting_for_message",
-        "AttachFileState:waiting_for_file"
-    ]:
-        # ❌ НЕ ОБРАБАТЫВАЕМ - пусть FSM обрабатывает
+    # Если мы в ЛЮБОМ FSM-состоянии - НЕ ОБРАБАТЫВАЕМ (пусть FSM обрабатывает)
+    if current_state is not None:
         return
 
-    # Если состояние начинается с AdminServiceEditState - тоже пропускаем
-    if current_state and "AdminServiceEditState" in current_state:
+    # Только если мы НЕ в FSM-состоянии - обрабатываем как ID акции
+    if not is_admin(message.from_user.id):
         return
 
     try:
@@ -2016,6 +1955,7 @@ async def process_promotion_id(message: Message, state: FSMContext):
         reply_markup=keyboard.as_markup(),
         parse_mode="HTML"
     )
+
 
 @dp.callback_query(F.data.startswith("promotion_do_activate_"))
 async def cb_promotion_do_activate(callback: CallbackQuery):
@@ -2087,7 +2027,8 @@ async def cb_service_edit(callback: CallbackQuery):
         service_id = int(callback.data.split("_")[2])
     except (ValueError, IndexError):
         await callback.answer("❌ Ошибка: неверный формат данных", show_alert=True)
-        service = await run_db(get_service, service_id)
+        return
+    service = await run_db(get_service, service_id)
     if not service:
         await callback.answer("❌ Услуга не найдена", show_alert=True)
         return
@@ -2904,6 +2845,7 @@ async def cb_set_price_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+# ===================== ЭТОТ ОБРАБОТЧИК ОТВЕЧАЕТ ЗА НАЗНАЧЕНИЕ ЦЕНЫ =====================
 @dp.message(AdminSetPriceState.waiting_for_price)
 async def cb_set_price_process(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
@@ -2923,9 +2865,11 @@ async def cb_set_price_process(message: Message, state: FSMContext):
         await run_db(add_admin_log, message.from_user.id, "set_price",
                      f"Назначил цену {new_price} руб. для заказа {order_code}")
         await message.answer(
-            f"✅ Цена для заказа <b>{escape_html(order_code)}</b> успешно обновлена на <b>{new_price} руб.</b>",
+            f"✅ Цена для заказа <b>{escape_html(order_code)}</b> успешно обновлена на <b>{new_price} руб.</b>\n\n"
+            f"Теперь вы можете подтвердить оплату!",
             parse_mode="HTML")
         await state.clear()
+        # Показываем обновлённый заказ
         await send_order_detail_message(message, order_id)
     except ValueError:
         await message.answer("❌ Введите корректное число. Попробуйте снова:", parse_mode="HTML")
