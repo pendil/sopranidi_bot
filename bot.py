@@ -1912,14 +1912,10 @@ async def cb_promotion_delete(callback: CallbackQuery):
 # ВАЖНО: этот обработчик НЕ ДОЛЖЕН перехватывать FSM-состояния!
 @dp.message(F.text & F.text.isdigit())
 async def process_promotion_id(message: Message, state: FSMContext):
-    # Проверяем, есть ли активное FSM-состояние
-    current_state = await state.get_state()
-
-    # Если мы в ЛЮБОМ FSM-состоянии - НЕ ОБРАБАТЫВАЕМ (пусть FSM обрабатывает)
-    if current_state is not None:
+    # ПРОВЕРЯЕМ: если есть активное состояние - НЕ ОБРАБАТЫВАЕМ
+    if await state.get_state() is not None:
         return
 
-    # Только если мы НЕ в FSM-состоянии - обрабатываем как ID акции
     if not is_admin(message.from_user.id):
         return
 
@@ -1955,7 +1951,6 @@ async def process_promotion_id(message: Message, state: FSMContext):
         reply_markup=keyboard.as_markup(),
         parse_mode="HTML"
     )
-
 
 @dp.callback_query(F.data.startswith("promotion_do_activate_"))
 async def cb_promotion_do_activate(callback: CallbackQuery):
@@ -2869,10 +2864,9 @@ async def cb_set_price_process(message: Message, state: FSMContext):
             f"Теперь вы можете подтвердить оплату!",
             parse_mode="HTML")
         await state.clear()
-        # Показываем обновлённый заказ
         await send_order_detail_message(message, order_id)
     except ValueError:
-        await message.answer("❌ Введите корректное число. Попробуйте снова:", parse_mode="HTML")
+        await message.answer("❌ Введите корректное число. Попробуйте снова:", parse_mode="HTML")ы
 
 
 # ===================== АДМИН: ОТОБРАЖЕНИЕ ДЕТАЛЕЙ ЗАКАЗА =====================
