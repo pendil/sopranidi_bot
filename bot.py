@@ -25,31 +25,23 @@ PIL_AVAILABLE = False
 try:
     import PIL
     from PIL import Image, ImageDraw, ImageFont
+
     PIL_AVAILABLE = True
     print(f"✅ Pillow загружен. Версия: {PIL.__version__}")
 except ImportError:
     print("⚠️ Pillow не загружен. Пытаемся установить...")
     import subprocess
     import sys
+
     try:
         subprocess.check_call([sys.executable, "-m", "pip", "install", "Pillow"])
         import PIL
         from PIL import Image, ImageDraw, ImageFont
+
         PIL_AVAILABLE = True
         print(f"✅ Pillow установлен и загружен! Версия: {PIL.__version__}")
     except Exception as e:
         print(f"❌ Не удалось установить Pillow: {e}")
-
-# ===================== ДЛЯ ГЕНЕРАЦИИ СЕРТИФИКАТОВ =====================
-try:
-    from PIL import Image, ImageDraw, ImageFont
-    from io import BytesIO
-    PIL_AVAILABLE = True
-    print("✅ Pillow успешно загружен!")
-except ImportError as e:
-    PIL_AVAILABLE = False
-    print(f"❌ Ошибка загрузки Pillow: {e}")
-    logging.warning("⚠️ Pillow не установлен. Генерация сертификатов будет недоступна.")
 
 # ===================== ЗАГРУЗКА .ENV =====================
 try:
@@ -207,23 +199,9 @@ def init_db():
             file_id TEXT DEFAULT '',
             is_urgent INTEGER DEFAULT 0,
             discount_applied INTEGER DEFAULT 0,
-            premier_stage TEXT DEFAULT 'consultation',
-            premier_progress INTEGER DEFAULT 0,
-            premier_theme TEXT DEFAULT '',
-            premier_volume TEXT DEFAULT '',
-            premier_deadline TEXT DEFAULT '',
-            premier_presentation TEXT DEFAULT '',
             FOREIGN KEY(user_id) REFERENCES users(user_id)
         )
     """)
-
-    # Добавляем колонки PREMIER если их нет
-    cur.execute("PRAGMA table_info(orders)")
-    columns = [col[1] for col in cur.fetchall()]
-
-    for col in ["premier_theme", "premier_volume", "premier_deadline", "premier_presentation"]:
-        if col not in columns:
-            cur.execute(f"ALTER TABLE orders ADD COLUMN {col} TEXT DEFAULT ''")
 
     # Услуги
     cur.execute("""
@@ -249,7 +227,7 @@ def init_db():
             ("Реферат", "Написание качественного реферата по любой теме", 1200),
             ("Редактирование работы", "Правка и доработка готовой работы", 800),
             ("Тотальная защита (PREMIER)",
-             "Полное сопровождение проекта: консультация, создание работы, объяснение материала, тренаж защиты и финальные правки. Гарантия оценки!",
+             "Полное сопровождение проекта: консультация, создание работы, объяснение материала, тренаж защиты и финальные правки.",
              3500),
         ]
         for name, desc, price in default_services:
@@ -564,7 +542,7 @@ def get_order(order_id: int):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute("""
-        SELECT order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id, is_urgent, premier_stage, premier_progress
+        SELECT order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id, is_urgent
         FROM orders WHERE order_id = ?
     """, (order_id,))
     row = cur.fetchone()
@@ -576,7 +554,7 @@ def get_user_orders(user_id: int):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute(
-        "SELECT order_id, service, price, status, created_at, admin_price, order_code, rating, review, is_urgent, premier_stage, premier_progress FROM orders WHERE user_id = ? ORDER BY created_at DESC",
+        "SELECT order_id, service, price, status, created_at, admin_price, order_code, rating, review, is_urgent FROM orders WHERE user_id = ? ORDER BY created_at DESC",
         (user_id,)
     )
     rows = cur.fetchall()
@@ -588,7 +566,7 @@ def get_all_orders():
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute("""
-        SELECT o.order_id, o.user_id, u.username, o.service, o.price, o.status, o.created_at, o.paid_at, o.admin_price, o.admin_note, o.order_code, o.rating, o.review, o.is_urgent, o.premier_stage, o.premier_progress
+        SELECT o.order_id, o.user_id, u.username, o.service, o.price, o.status, o.created_at, o.paid_at, o.admin_price, o.admin_note, o.order_code, o.rating, o.review, o.is_urgent
         FROM orders o
         LEFT JOIN users u ON o.user_id = u.user_id
         ORDER BY o.created_at DESC
@@ -687,47 +665,6 @@ def get_stats():
     }
 
 
-# ===================== PREMIER МЕТОДЫ =====================
-def update_premier_progress(order_id: int, stage: str, progress: int = 0):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE orders SET premier_stage = ?, premier_progress = ? WHERE order_id = ?",
-        (stage, progress, order_id)
-    )
-    conn.commit()
-    conn.close()
-
-
-def get_all_premier_orders():
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT o.order_id, o.order_code, o.service, o.status, o.created_at,
-               o.premier_stage, o.premier_progress, u.username, u.first_name
-        FROM orders o
-        LEFT JOIN users u ON o.user_id = u.user_id
-        WHERE o.service LIKE '%PREMIER%' OR o.service LIKE '%Тотальная защита%'
-        ORDER BY o.created_at DESC
-    """)
-    rows = cur.fetchall()
-    conn.close()
-    return rows
-
-
-def get_premier_data(order_id: int):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT premier_theme, premier_volume, premier_deadline, premier_presentation,
-               premier_stage, premier_progress
-        FROM orders WHERE order_id = ?
-    """, (order_id,))
-    row = cur.fetchone()
-    conn.close()
-    return row
-
-
 # ===================== УПРАВЛЕНИЕ УСЛУГАМИ =====================
 def get_all_services():
     conn = sqlite3.connect(DB_NAME)
@@ -790,216 +727,6 @@ def get_services_keyboard(services: list) -> InlineKeyboardMarkup:
     builder.adjust(1)
     return builder.as_markup()
 
-
-# ===================== ФУНКЦИИ ДЛЯ PREMIER =====================
-def get_premier_stage_emoji(stage: str) -> str:
-    stages = {
-        "consultation": "🎯",
-        "creation": "✍️",
-        "explanation": "🧠",
-        "training": "🎤",
-        "completed": "🏆"
-    }
-    return stages.get(stage, "📌")
-
-
-def get_premier_stage_text(stage: str) -> str:
-    stages = {
-        "consultation": "Консультация",
-        "creation": "Создание работы",
-        "explanation": "Объяснение материала",
-        "training": "Тренаж защиты",
-        "completed": "Защита пройдена! 🎉"
-    }
-    return stages.get(stage, "В процессе")
-
-
-def get_premier_progress_bar(progress: int) -> str:
-    filled = int(progress / 10)
-    empty = 10 - filled
-    return "█" * filled + "░" * empty
-
-
-def format_premier_progress(order: tuple) -> str:
-    stage = order[14] if len(order) > 14 else "consultation"
-    progress = order[15] if len(order) > 15 else 0
-
-    stages = ["consultation", "creation", "explanation", "training", "completed"]
-    stage_index = stages.index(stage) if stage in stages else 0
-
-    text = "🎯 *Ваш путь к защите*\n\n"
-    text += "Путь: от идеи до пятёрки 🚀\n\n"
-    text += "┌─────────────────────────────────────────┐\n"
-
-    for i, s in enumerate(stages):
-        is_completed = i < stage_index
-        is_current = i == stage_index
-        emoji = "✅" if is_completed else "⏳" if is_current else "⬜"
-        name = get_premier_stage_text(s)
-
-        if is_current and s != "completed":
-            bar = get_premier_progress_bar(progress)
-            text += f"│  {emoji} {name} ({progress}%)\n"
-            text += f"│     {bar}\n"
-        else:
-            text += f"│  {emoji} {name}\n"
-
-        if is_current and progress < 100 and s != "completed":
-            text += f"│     ⏰ Осталось: {100 - progress}%\n"
-        elif is_completed and s != "completed":
-            text += f"│     ✅ Завершено!\n"
-        elif s == "completed" and is_completed:
-            text += f"│     🏆 Ты готов на 100%!\n"
-        elif s == "completed" and not is_completed:
-            text += f"│     ➡️ Следующий шаг\n"
-
-        if i < len(stages) - 1:
-            text += "├─────────────────────────────────────────┤\n"
-
-    text += "└─────────────────────────────────────────┘\n"
-    text += f"\n📊 Прогресс: {progress}%\n"
-
-    tips = {
-        0: "💡 *Совет:* Начни с чёткого плана работы.",
-        25: "💡 *Совет:* Используй схемы и таблицы — это повышает оценку.",
-        50: "💡 *Совет:* Повтори основные тезисы своей работы.",
-        75: "💡 *Совет:* Отработай вопросы, которые могут задать.",
-        100: "💡 *Совет:* Ты готов! Удачи на защите! 🍀"
-    }
-
-    closest_tip = 0
-    for tip_progress in [0, 25, 50, 75, 100]:
-        if progress >= tip_progress:
-            closest_tip = tip_progress
-
-    text += "\n" + tips.get(closest_tip, "💡 *Совет:* Будь уверен в себе!")
-
-    return text
-
-
-def generate_certificate(user_name: str, service_name: str, completion_date: str, order_code: str) -> BytesIO:
-    """Генерирует красивый сертификат с чёткими координатами"""
-    if not PIL_AVAILABLE:
-        return None
-
-    try:
-        from PIL import Image, ImageDraw, ImageFont
-        from io import BytesIO
-    except ImportError as e:
-        logging.error(f"Ошибка импорта Pillow: {e}")
-        return None
-
-    # Размер
-    width, height = 1200, 850
-
-    # Создаём изображение
-    img = Image.new('RGB', (width, height), (255, 255, 255))
-    draw = ImageDraw.Draw(img)
-
-    # Цвета
-    gold = (212, 175, 55)
-    dark = (20, 20, 30)
-    gray = (100, 100, 100)
-
-    # ===== ШРИФТЫ =====
-    try:
-        font_big = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVu-Serif-Bold.ttf", 48)
-        font_name = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVu-Serif-Bold.ttf", 60)
-        font_medium = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVu-Serif.ttf", 28)
-        font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVu-Serif.ttf", 22)
-        font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVu-Serif-Bold.ttf", 32)
-    except:
-        try:
-            font_big = ImageFont.truetype("C:/Windows/Fonts/timesbd.ttf", 48)
-            font_name = ImageFont.truetype("C:/Windows/Fonts/timesbd.ttf", 60)
-            font_medium = ImageFont.truetype("C:/Windows/Fonts/times.ttf", 28)
-            font_small = ImageFont.truetype("C:/Windows/Fonts/times.ttf", 22)
-            font_bold = ImageFont.truetype("C:/Windows/Fonts/timesbd.ttf", 32)
-        except:
-            font_big = ImageFont.load_default()
-            font_name = ImageFont.load_default()
-            font_medium = ImageFont.load_default()
-            font_small = ImageFont.load_default()
-            font_bold = ImageFont.load_default()
-
-    # ===== РИСУЕМ =====
-
-    # 1. РАМКИ
-    draw.rectangle([(20, 20), (width - 20, height - 20)], outline=gold, width=4)
-    draw.rectangle([(40, 40), (width - 40, height - 40)], outline=(200, 200, 200), width=2)
-
-    # 2. ЗАГОЛОВОК (Y=50)
-    title = "SOPRANIDI CORPORATION"
-    bbox = draw.textbbox((0, 0), title, font=font_big)
-    draw.text(((width - (bbox[2] - bbox[0])) // 2, 50), title, fill=gold, font=font_big)
-
-    # 3. СЕРТИФИКАТ (Y=110)
-    cert = "СЕРТИФИКАТ"
-    bbox = draw.textbbox((0, 0), cert, font=font_big)
-    draw.text(((width - (bbox[2] - bbox[0])) // 2, 110), cert, fill=dark, font=font_big)
-
-    # 4. ЛИНИЯ (Y=170)
-    draw.line([(300, 170), (width - 300, 170)], fill=gold, width=2)
-
-    # 5. ТЕКСТ (Y=200)
-    text1 = "Настоящий сертификат подтверждает, что"
-    bbox = draw.textbbox((0, 0), text1, font=font_medium)
-    draw.text(((width - (bbox[2] - bbox[0])) // 2, 200), text1, fill=gray, font=font_medium)
-
-    # 6. ИМЯ (Y=260)
-    display_name = user_name[:30].upper()
-    bbox = draw.textbbox((0, 0), display_name, font=font_name)
-    draw.text(((width - (bbox[2] - bbox[0])) // 2, 260), display_name, fill=dark, font=font_name)
-
-    # 7. ЛИНИЯ ПОД ИМЕНЕМ (Y=340)
-    draw.line([(width // 2 - 250, 340), (width // 2 + 250, 340)], fill=gold, width=2)
-
-    # 8. ТЕКСТ (Y=370)
-    text2 = "успешно завершил(а) программу"
-    bbox = draw.textbbox((0, 0), text2, font=font_medium)
-    draw.text(((width - (bbox[2] - bbox[0])) // 2, 370), text2, fill=gray, font=font_medium)
-
-    # 9. УСЛУГА (Y=420)
-    display_service = service_name[:40]
-    bbox = draw.textbbox((0, 0), display_service, font=font_bold)
-    draw.text(((width - (bbox[2] - bbox[0])) // 2, 420), display_service, fill=gold, font=font_bold)
-
-    # 10. ОПИСАНИЕ (Y=470)
-    desc = "с полным сопровождением и гарантией качества"
-    bbox = draw.textbbox((0, 0), desc, font=font_medium)
-    draw.text(((width - (bbox[2] - bbox[0])) // 2, 470), desc, fill=gray, font=font_medium)
-
-    # 11. КОД ЗАКАЗА (Y=770)
-    code_text = f"Код заказа: {order_code}"
-    bbox = draw.textbbox((0, 0), code_text, font=font_small)
-    draw.text((60, height - 70), code_text, fill=gray, font=font_small)
-
-    # 12. ДАТА (Y=770)
-    date_text = f"Дата выдачи: {completion_date}"
-    bbox = draw.textbbox((0, 0), date_text, font=font_small)
-    draw.text((width - (bbox[2] - bbox[0]) - 60, height - 70), date_text, fill=gray, font=font_small)
-
-    # 13. ПОДПИСИ (Y=720)
-    draw.text((200, height - 120), "___________ Диспетчер", fill=gray, font=font_small)
-    draw.text((width - 350, height - 120), "___________ CEO", fill=gray, font=font_small)
-
-    # 14. ПЕЧАТЬ (справа снизу)
-    seal_x, seal_y = width - 140, height - 140
-    draw.ellipse([(seal_x - 60, seal_y - 60), (seal_x + 60, seal_y + 60)], outline=gold, width=3)
-    draw.ellipse([(seal_x - 45, seal_y - 45), (seal_x + 45, seal_y + 45)], outline=gold, width=1)
-    seal_text = "★ SOPRANIDI ★"
-    bbox = draw.textbbox((0, 0), seal_text, font=font_small)
-    draw.text((seal_x - (bbox[2] - bbox[0]) // 2, seal_y - 10), seal_text, fill=gold, font=font_small)
-
-    # 15. ЗВЁЗДОЧКИ (декор)
-    for i, x in enumerate([200, 400, 600, 800, 1000]):
-        draw.text((x, 620), "✦", fill=(230, 220, 200), font=font_small)
-
-    # Сохраняем
-    output = BytesIO()
-    img.save(output, format='PNG')
-    output.seek(0)
-    return output
 
 # ===================== УПРАВЛЕНИЕ АКЦИЯМИ =====================
 def create_promotion(name: str, description: str, discount: int, valid_until: str, service_id: int = 0):
@@ -1331,7 +1058,6 @@ def admin_menu_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="📊 Статистика", callback_data="admin_stats")
     builder.button(text="👥 Пользователи", callback_data="admin_users")
     builder.button(text="📦 Заказы", callback_data="admin_orders")
-    builder.button(text="🛡️ PREMIER-заказы", callback_data="admin_premier")
     builder.button(text="📊 Экспорт заказов", callback_data="admin_export_orders")
     builder.button(text="⭐ Управление отзывами", callback_data="admin_reviews")
     builder.button(text="🛠️ Управление услугами", callback_data="admin_services")
@@ -1453,8 +1179,7 @@ def orders_keyboard(orders: list, page: int = 0) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def order_detail_keyboard(order_id: int, status: str, is_urgent: int = 0,
-                          is_premier: bool = False) -> InlineKeyboardMarkup:
+def order_detail_keyboard(order_id: int, status: str, is_urgent: int = 0) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     if status == "pending":
         builder.button(text="✅ Подтвердить оплату", callback_data=f"confirm_payment_{order_id}")
@@ -1469,8 +1194,6 @@ def order_detail_keyboard(order_id: int, status: str, is_urgent: int = 0,
     elif status == "paid":
         builder.button(text="📎 Прикрепить файл", callback_data=f"attach_file_{order_id}")
         builder.button(text="❌ Удалить заказ", callback_data=f"delete_order_{order_id}")
-        if is_premier:
-            builder.button(text="🏆 Выдать сертификат", callback_data=f"premier_certificate_{order_id}")
     builder.button(text="🔙 Назад к заказам", callback_data="admin_orders")
     builder.adjust(1)
     return builder.as_markup()
@@ -1575,13 +1298,6 @@ class AdminPromotionCreateState(StatesGroup):
     waiting_for_description = State()
     waiting_for_discount = State()
     waiting_for_valid_until = State()
-
-
-class PremierOrderState(StatesGroup):
-    waiting_for_theme = State()
-    waiting_for_volume = State()
-    waiting_for_deadline = State()
-    waiting_for_presentation = State()
 
 
 # ===================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====================
@@ -2002,36 +1718,6 @@ async def cb_admin_stats(callback: CallbackQuery):
     await callback.answer()
 
 
-# ===================== АДМИН: PREMIER-ЗАКАЗЫ =====================
-@dp.callback_query(F.data == "admin_premier")
-async def cb_admin_premier(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("⛔ Нет доступа", show_alert=True)
-        return
-    orders = await run_db(get_all_premier_orders)
-    if not orders:
-        text = "🛡️ <b>PREMIER-заказы</b>\n\nНет активных PREMIER-заказов."
-        await update_message(callback, text, admin_menu_keyboard(), "HTML")
-        await callback.answer()
-        return
-    text = "🛡️ <b>PREMIER-заказы</b>\n\n"
-    for order in orders:
-        order_id, order_code, service, status, created_at, stage, progress, username, first_name = order
-        name = username or first_name or "Пользователь"
-        stage_text = get_premier_stage_text(stage)
-        status_icon = "✅" if status == "paid" else "⏳" if status == "pending" else "🔧" if status == "in_progress" else "❌"
-        bar = get_premier_progress_bar(progress)
-        text += f"{status_icon} <b>{order_code}</b> - {name}\n"
-        text += f"   📊 {stage_text}: {progress}%\n"
-        text += f"   {bar}\n\n"
-    keyboard = InlineKeyboardBuilder()
-    keyboard.button(text="📦 Все заказы", callback_data="admin_orders")
-    keyboard.button(text="🔙 Назад", callback_data="admin_menu")
-    keyboard.adjust(1)
-    await update_message(callback, text, keyboard.as_markup(), "HTML")
-    await callback.answer()
-
-
 # ===================== АДМИН: УПРАВЛЕНИЕ АКЦИЯМИ =====================
 @dp.callback_query(F.data == "admin_promotions")
 async def cb_admin_promotions(callback: CallbackQuery):
@@ -2189,7 +1875,7 @@ async def process_promotion_valid_until(message: Message, state: FSMContext):
     await run_db(add_admin_log, message.from_user.id, "create_promotion",
                  f"Создал акцию {data['name']} ({data['discount']}%) для {data.get('service_name', 'всех услуг')}")
     valid_text = "бесконечно" if valid_until == (
-                datetime.now() + timedelta(days=365 * 100)).isoformat() else datetime.fromisoformat(
+            datetime.now() + timedelta(days=365 * 100)).isoformat() else datetime.fromisoformat(
         valid_until).strftime("%d.%m.%Y")
     service_text = "всем услугам" if data.get('service_id', 0) == 0 else data.get('service_name', 'всем услугам')
     await message.answer(
@@ -2804,7 +2490,7 @@ async def cb_user_orders_detail(callback: CallbackQuery):
     else:
         text = f"📦 <b>Заказы пользователя (ID: {user_id}):</b>\n\n"
         for order in orders:
-            order_id, service, price, status, created_at, admin_price, order_code, rating, _, is_urgent, premier_stage, premier_progress = order
+            order_id, service, price, status, created_at, admin_price, order_code, rating, _, is_urgent = order
             status_text = "✅ Оплачен" if status == "paid" else "⏳ Ожидает" if status == "pending" else "🔧 В работе" if status == "in_progress" else "❌ Отменён"
             final_price = admin_price if admin_price > 0 else price
             created = datetime.fromisoformat(created_at).strftime("%d.%m.%Y")
@@ -2906,14 +2592,13 @@ async def cb_order_detail(callback: CallbackQuery):
     user = await run_db(get_user, order[1])
     user_display = f"@{user[1]}" if user and user[1] else f"ID:{order[1]}"
 
-    order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id, is_urgent, premier_stage, premier_progress = order
+    order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id, is_urgent = order
     status_text = "✅ Оплачен" if status == "paid" else "⏳ Ожидает оплаты" if status == "pending" else "🔧 В работе" if status == "in_progress" else "❌ Отменён"
     final_price = admin_price if admin_price > 0 else price
     display_code = order_code or f"#{order_id}"
     urgent = "🔥 Срочный заказ!\n" if is_urgent else ""
     created = datetime.fromisoformat(created_at).strftime("%d.%m.%Y %H:%M")
     paid = datetime.fromisoformat(paid_at).strftime("%d.%m.%Y %H:%M") if paid_at else "Не оплачен"
-    is_premier = "PREMIER" in service or "Тотальная защита" in service
 
     text = f"""
 <b>📦 Информация о заказе {escape_html(display_code)}</b>
@@ -2935,10 +2620,7 @@ async def cb_order_detail(callback: CallbackQuery):
     if admin_note:
         text += f"📌 Заметка: {escape_html(admin_note)}\n"
 
-    if is_premier and status == "paid":
-        text += "\n" + format_premier_progress(order)
-
-    await update_message(callback, text, order_detail_keyboard(order_id, status, is_urgent, is_premier), "HTML")
+    await update_message(callback, text, order_detail_keyboard(order_id, status, is_urgent), "HTML")
     await callback.answer()
 
 
@@ -3227,14 +2909,13 @@ async def send_order_detail_message(message: Message, order_id: int):
     user = await run_db(get_user, order[1])
     user_display = f"@{user[1]}" if user and user[1] else f"ID:{order[1]}"
 
-    order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id, is_urgent, premier_stage, premier_progress = order
+    order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id, is_urgent = order
     status_text = "✅ Оплачен" if status == "paid" else "⏳ Ожидает оплаты" if status == "pending" else "🔧 В работе" if status == "in_progress" else "❌ Отменён"
     final_price = admin_price if admin_price > 0 else price
     display_code = order_code or f"#{order_id}"
     urgent = "🔥 Срочный заказ!\n" if is_urgent else ""
     created = datetime.fromisoformat(created_at).strftime("%d.%m.%Y %H:%M")
     paid = datetime.fromisoformat(paid_at).strftime("%d.%m.%Y %H:%M") if paid_at else "Не оплачен"
-    is_premier = "PREMIER" in service or "Тотальная защита" in service
 
     text = f"""
 <b>📦 Информация о заказе {escape_html(display_code)}</b>
@@ -3256,10 +2937,7 @@ async def send_order_detail_message(message: Message, order_id: int):
     if admin_note:
         text += f"📌 Заметка: {escape_html(admin_note)}\n"
 
-    if is_premier and status == "paid":
-        text += "\n" + format_premier_progress(order)
-
-    await message.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent, is_premier),
+    await message.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent),
                          parse_mode="HTML")
 
 
@@ -3406,14 +3084,13 @@ async def show_order_detail(target, order_id: int, is_callback: bool = False):
     user = await run_db(get_user, order[1])
     user_display = f"@{user[1]}" if user and user[1] else f"ID:{order[1]}"
 
-    order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id, is_urgent, premier_stage, premier_progress = order
+    order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id, is_urgent = order
     status_text = "✅ Оплачен" if status == "paid" else "⏳ Ожидает оплаты" if status == "pending" else "🔧 В работе" if status == "in_progress" else "❌ Отменён"
     final_price = admin_price if admin_price > 0 else price
     display_code = order_code or f"#{order_id}"
     urgent = "🔥 Срочный заказ!\n" if is_urgent else ""
     created = datetime.fromisoformat(created_at).strftime("%d.%m.%Y %H:%M")
     paid = datetime.fromisoformat(paid_at).strftime("%d.%m.%Y %H:%M") if paid_at else "Не оплачен"
-    is_premier = "PREMIER" in service or "Тотальная защита" in service
 
     text = f"""
 <b>📦 Информация о заказе {escape_html(display_code)}</b>
@@ -3435,18 +3112,15 @@ async def show_order_detail(target, order_id: int, is_callback: bool = False):
     if admin_note:
         text += f"📌 Заметка: {escape_html(admin_note)}\n"
 
-    if is_premier and status == "paid":
-        text += "\n" + format_premier_progress(order)
-
     if is_callback:
         try:
-            await target.edit_text(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent, is_premier),
+            await target.edit_text(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent),
                                    parse_mode="HTML")
         except Exception:
-            await target.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent, is_premier),
+            await target.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent),
                                 parse_mode="HTML")
     else:
-        await target.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent, is_premier),
+        await target.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent),
                             parse_mode="HTML")
 
 
@@ -3507,58 +3181,6 @@ async def cb_attach_file_process(message: Message, state: FSMContext):
                                    parse_mode="HTML")
         except Exception as e:
             logging.warning(f"Не удалось уведомить пользователя {order[1]}: {e}")
-
-
-# ===================== ВЫДАЧА СЕРТИФИКАТА =====================
-@dp.callback_query(F.data.startswith("premier_certificate_"))
-async def cb_premier_certificate(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("⛔ Нет доступа", show_alert=True)
-        return
-
-    order_id = int(callback.data.split("_")[2])
-    order = await run_db(get_order, order_id)
-    if not order:
-        await callback.answer("❌ Заказ не найден", show_alert=True)
-        return
-
-    user_id = order[1]
-    user = await run_db(get_user, user_id)
-    if not user:
-        await callback.answer("❌ Пользователь не найден", show_alert=True)
-        return
-
-    user_name = f"{user[2]} {user[3] or ''}".strip() or user[1] or f"ID:{user_id}"
-    order_code = order[9] or f"#{order_id}"
-    service_name = order[2]
-    completion_date = datetime.now().strftime("%d.%m.%Y")
-
-    await callback.answer("⏳ Генерируем сертификат...")
-
-    cert_image = await run_db(generate_certificate, user_name, service_name, completion_date, order_code)
-
-    if cert_image:
-        await callback.message.answer_document(
-            document=BufferedInputFile(cert_image.getvalue(), filename=f"certificate_{order_code}.png"),
-            caption=f"🏆 <b>Сертификат для заказа {order_code}</b>\n\n👤 {user_name}\n📋 {service_name}\n📅 {completion_date}",
-            parse_mode="HTML"
-        )
-        try:
-            await bot.send_document(
-                user_id,
-                BufferedInputFile(cert_image.getvalue(), filename=f"certificate_{order_code}.png"),
-                caption=f"🏆 <b>Поздравляем с успешным завершением!</b>\n\nВаш сертификат о прохождении программы:\n📋 {service_name}\n📅 {completion_date}\n\nСпасибо, что выбрали Sopranidi Corp.! 🎉",
-                parse_mode="HTML"
-            )
-            await callback.answer("✅ Сертификат отправлен пользователю!", show_alert=True)
-        except Exception as e:
-            logging.warning(f"Не удалось отправить сертификат пользователю: {e}")
-            await callback.answer("⚠️ Сертификат сгенерирован, но не отправлен пользователю", show_alert=True)
-    else:
-        await callback.answer("❌ Pillow не установлен. Установите: pip install Pillow", show_alert=True)
-
-    await run_db(add_admin_log, callback.from_user.id, "certificate_generated",
-                 f"Сгенерировал сертификат для заказа {order_code}")
 
 
 # ===================== ОТЗЫВЫ (ПОЛЬЗОВАТЕЛЬ) =====================
@@ -3679,7 +3301,7 @@ async def cb_user_order_detail(callback: CallbackQuery):
     if order[1] != user_id:
         await callback.answer("⛔ Это не ваш заказ", show_alert=True)
         return
-    order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id, is_urgent, premier_stage, premier_progress = order
+    order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id, is_urgent = order
     status_text = "✅ Оплачен" if status == "paid" else "⏳ Ожидает оплаты" if status == "pending" else "🔧 В работе" if status == "in_progress" else "❌ Отменён"
     final_price = admin_price if admin_price > 0 else price
     display_code = order_code or f"#{order_id}"
@@ -3710,9 +3332,6 @@ async def cb_user_order_detail(callback: CallbackQuery):
         return
     if admin_note:
         text += f"\n📌 Заметка: {escape_html(admin_note)}\n"
-
-    if "Тотальная защита" in service and status == "paid":
-        text += "\n" + format_premier_progress(order)
 
     await update_message(callback, text, order_user_keyboard(order_id, status), "HTML")
     await callback.answer()
@@ -3770,26 +3389,6 @@ async def cb_service_from_db(callback: CallbackQuery, state: FSMContext):
         await callback.answer("❌ Эта услуга временно недоступна", show_alert=True)
         return
 
-    if "Тотальная защита" in name or "PREMIER" in name:
-        await state.update_data(service_id=service_id, service_name=name, service_price=price)
-        text = f"""
-🛡️ *{name}*
-
-{description}
-
-💰 Стоимость: от {price} ₽
-(точную цену назовёт администратор)
-
-📝 Для оформления заявки ответьте на несколько вопросов:
-
-<b>1. Какая тема вашего проекта?</b>
-Напишите кратко, о чём работа.
-"""
-        await callback.message.edit_text(text, parse_mode="HTML")
-        await state.set_state(PremierOrderState.waiting_for_theme)
-        await callback.answer()
-        return
-
     promotions = await run_db(get_active_promotions)
     promo_discount = 0
     promo_name = ""
@@ -3830,115 +3429,6 @@ async def cb_service_from_db(callback: CallbackQuery, state: FSMContext):
     keyboard.adjust(1)
     await update_message(callback, text, keyboard.as_markup(), "HTML")
     await callback.answer()
-
-
-# ===================== PREMIER FSM =====================
-@dp.message(PremierOrderState.waiting_for_theme)
-async def process_premier_theme(message: Message, state: FSMContext):
-    await state.update_data(theme=message.text)
-    await message.answer(
-        "📄 <b>2. Какой объём работы требуется?</b>\nНапишите примерное количество страниц или слов.\nПример: 15-20 страниц",
-        parse_mode="HTML")
-    await state.set_state(PremierOrderState.waiting_for_volume)
-
-
-@dp.message(PremierOrderState.waiting_for_volume)
-async def process_premier_volume(message: Message, state: FSMContext):
-    await state.update_data(volume=message.text)
-    await message.answer(
-        "⏰ <b>3. Когда нужна готовая работа?</b>\nУкажите желаемую дату сдачи.\nПример: 25 декабря 2026",
-        parse_mode="HTML")
-    await state.set_state(PremierOrderState.waiting_for_deadline)
-
-
-@dp.message(PremierOrderState.waiting_for_deadline)
-async def process_premier_deadline(message: Message, state: FSMContext):
-    await state.update_data(deadline=message.text)
-    keyboard = InlineKeyboardBuilder()
-    keyboard.button(text="✅ Да", callback_data="premier_presentation_yes")
-    keyboard.button(text="❌ Нет", callback_data="premier_presentation_no")
-    keyboard.adjust(2)
-    await message.answer("📊 <b>4. Нужна ли презентация?</b>\nВыберите вариант:", reply_markup=keyboard.as_markup(),
-                         parse_mode="HTML")
-    await state.set_state(PremierOrderState.waiting_for_presentation)
-
-
-@dp.callback_query(F.data.startswith("premier_presentation_"))
-async def process_premier_presentation(callback: CallbackQuery, state: FSMContext):
-    presentation = "Да" if callback.data == "premier_presentation_yes" else "Нет"
-    await state.update_data(presentation=presentation)
-
-    data = await state.get_data()
-    user_id = callback.from_user.id
-
-    order_id, order_code = await run_db(add_order, user_id, "Тотальная защита (PREMIER)", 3500, 0, 0)
-    await run_db(update_premier_progress, order_id, "consultation", 0)
-
-    text = f"""
-✅ <b>Заявка на «Тотальную защиту (PREMIER)» оформлена!</b>
-
-📋 <b>Детали заявки:</b>
-🎯 Тема: {escape_html(data.get('theme'))}
-📄 Объём: {escape_html(data.get('volume'))}
-⏰ Срок: {escape_html(data.get('deadline'))}
-📊 Презентация: {presentation}
-
-🏷️ <b>Код заказа:</b> {escape_html(order_code)}
-
-💰 Стоимость: от 3 500 ₽ (уточнит администратор)
-
-📞 <b>С вами свяжется администратор для обсуждения деталей и финальной цены!</b>
-
-🎁 <b>ГАРАНТИЯ ОЦЕНКИ:</b>
-Если вы не получите оценку «отлично» (5) после прохождения всех этапов подготовки — мы вернём 50% стоимости!
-
-📊 <b>Ваш прогресс:</b>
-{format_premier_progress((None, None, None, None, None, None, None, None, None, None, None, None, None, None, "consultation", 0))}
-"""
-
-    keyboard = InlineKeyboardBuilder()
-    keyboard.button(text="📋 Мои заказы", callback_data="my_orders")
-    keyboard.button(text="📞 Связаться с диспетчером", url=f"https://t.me/{DISPATCHER_USERNAME.replace('@', '')}")
-    keyboard.button(text="🔙 На главную", callback_data="main_menu")
-    keyboard.adjust(1)
-
-    await callback.message.edit_text(text, reply_markup=keyboard.as_markup(), parse_mode="HTML")
-    await callback.answer()
-
-    user = await run_db(get_user, user_id)
-    for admin_id in ADMINS:
-        try:
-            msg = f"""
-🆕 <b>НОВАЯ ЗАЯВКА НА PREMIER!</b> 🛡️
-
-<b>👤 Клиент:</b> @{user[1] or 'без username'} (ID: {user_id})
-<b>📋 Код заказа:</b> {order_code}
-
-<b>📋 Детали заявки:</b>
-🎯 Тема: {escape_html(data.get('theme'))}
-📄 Объём: {escape_html(data.get('volume'))}
-⏰ Срок: {escape_html(data.get('deadline'))}
-📊 Презентация: {presentation}
-
-💰 <b>Цена:</b> от 3 500 ₽
-
-<b>📊 Текущий этап:</b> Консультация (0%)
-
-📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}
-
-⚡ <b>Действия:</b>
-1. Свяжитесь с клиентом
-2. Обсудите детали
-3. Установите финальную цену
-4. Начните работу!
-
-<a href="tg://user?id={user_id}">👤 Написать клиенту</a>
-"""
-            await bot.send_message(admin_id, msg, parse_mode="HTML", disable_web_page_preview=True)
-        except Exception as e:
-            logging.error(f"Ошибка уведомления админа: {e}")
-
-    await state.clear()
 
 
 # ===================== ОБЫЧНЫЙ ЗАКАЗ =====================
@@ -4132,7 +3622,7 @@ async def cb_my_orders(callback: CallbackQuery):
         return
     text = "<b>📋 Ваши заказы:</b>\n\n"
     for order in orders:
-        order_id, service, price, status, created_at, admin_price, order_code, rating, _, is_urgent, premier_stage, premier_progress = order
+        order_id, service, price, status, created_at, admin_price, order_code, rating, _, is_urgent = order
         status_text = {"pending": "⏳ Ожидает оплаты", "paid": "✅ Оплачен", "in_progress": "🔧 В работе",
                        "cancelled": "❌ Отменён"}.get(status, status)
         final_price = admin_price if admin_price > 0 else price
@@ -4143,7 +3633,7 @@ async def cb_my_orders(callback: CallbackQuery):
         text += f"• {urgent}{escape_html(display_code)}: {escape_html(service)} - {final_price} руб. ({status_text}) [{created}] {rating_str}\n"
     builder = InlineKeyboardBuilder()
     for order in orders:
-        order_id, service, price, status, created_at, admin_price, order_code, rating, _, is_urgent, premier_stage, premier_progress = order
+        order_id, service, price, status, created_at, admin_price, order_code, rating, _, is_urgent = order
         display_code = order_code or f"#{order_id}"
         status_emoji = "✅" if status == "paid" else "⏳" if status == "pending" else "🔧" if status == "in_progress" else "❌"
         urgent = "🔥" if is_urgent else ""
