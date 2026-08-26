@@ -878,7 +878,7 @@ def format_premier_progress(order: tuple) -> str:
 
 
 def generate_certificate(user_name: str, service_name: str, completion_date: str, order_code: str) -> BytesIO:
-    """Генерирует сертификат с чёткими координатами"""
+    """Генерирует простой и красивый сертификат"""
     if not PIL_AVAILABLE:
         return None
 
@@ -892,106 +892,151 @@ def generate_certificate(user_name: str, service_name: str, completion_date: str
     # Размер
     width, height = 1200, 850
 
-    # Создаём изображение
-    img = Image.new('RGB', (width, height), (255, 255, 255))
+    # Создаём изображение с белым фоном
+    img = Image.new('RGB', (width, height), '#FFFFFF')
     draw = ImageDraw.Draw(img)
 
     # Цвета
-    gold = (212, 175, 55)
-    dark = (30, 30, 30)
-    gray = (100, 100, 100)
+    gold = '#D4AF37'  # Золотой
+    dark = '#1A1A2E'  # Тёмно-синий
+    gray = '#666666'  # Серый
+    light_gold = '#F5E6C8'  # Светло-золотой для фона
 
-    # ===== ПРОБУЕМ ЗАГРУЗИТЬ ШРИФТЫ =====
+    # Заливка фона светлым градиентом
+    for i in range(height):
+        r = 248 - int((i / height) * 15)
+        g = 245 - int((i / height) * 15)
+        b = 235 - int((i / height) * 15)
+        draw.line([(0, i), (width, i)], fill=(r, g, b), width=1)
+
+    # ===== РАМКИ =====
+    # Внешняя золотая
+    draw.rectangle([(20, 20), (width - 20, height - 20)], outline=gold, width=4)
+    # Внутренняя
+    draw.rectangle([(40, 40), (width - 40, height - 40)], outline=gold, width=1)
+    # Декоративная
+    draw.rectangle([(50, 50), (width - 50, height - 50)], outline=light_gold, width=2)
+
+    # ===== ЗАГРУЗКА ШРИФТОВ (ПРОСТАЯ) =====
     try:
-        # Пытаемся загрузить шрифты (с уменьшенным размером для надёжности)
-        font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVu-Serif-Bold.ttf", 44)
-        font_name = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVu-Serif-Bold.ttf", 52)
-        font_text = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVu-Serif.ttf", 26)
-        font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVu-Serif.ttf", 20)
-        font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVu-Serif-Bold.ttf", 30)
+        # Пытаемся загрузить крупный шрифт
+        font_big = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVu-Serif-Bold.ttf", 60)
+        font_name = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVu-Serif-Bold.ttf", 70)
+        font_medium = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVu-Serif.ttf", 32)
+        font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVu-Serif.ttf", 24)
         print("✅ Шрифты загружены")
     except:
         try:
             # Windows
-            font_title = ImageFont.truetype("C:/Windows/Fonts/timesbd.ttf", 44)
-            font_name = ImageFont.truetype("C:/Windows/Fonts/timesbd.ttf", 52)
-            font_text = ImageFont.truetype("C:/Windows/Fonts/times.ttf", 26)
-            font_small = ImageFont.truetype("C:/Windows/Fonts/times.ttf", 20)
-            font_bold = ImageFont.truetype("C:/Windows/Fonts/timesbd.ttf", 30)
+            font_big = ImageFont.truetype("C:/Windows/Fonts/timesbd.ttf", 60)
+            font_name = ImageFont.truetype("C:/Windows/Fonts/timesbd.ttf", 70)
+            font_medium = ImageFont.truetype("C:/Windows/Fonts/times.ttf", 32)
+            font_small = ImageFont.truetype("C:/Windows/Fonts/times.ttf", 24)
             print("✅ Шрифты Windows загружены")
         except:
-            # Стандартный шрифт
+            # Если шрифты не загрузились - создаём свой через ImageFont
             print("⚠️ Используем стандартный шрифт")
-            font_title = ImageFont.load_default()
+            font_big = ImageFont.load_default()
             font_name = ImageFont.load_default()
-            font_text = ImageFont.load_default()
+            font_medium = ImageFont.load_default()
             font_small = ImageFont.load_default()
-            font_bold = ImageFont.load_default()
 
-    # ===== РИСУЕМ =====
-
-    # Рамка
-    draw.rectangle([(20, 20), (width - 20, height - 20)], outline=gold, width=4)
-    draw.rectangle([(40, 40), (width - 40, height - 40)], outline=(200, 200, 200), width=2)
-
-    # Заголовок
+    # ===== ТЕКСТ =====
+    # Заголовок компании
     title = "SOPRANIDI CORPORATION"
-    bbox = draw.textbbox((0, 0), title, font=font_title)
-    draw.text(((width - (bbox[2] - bbox[0])) // 2, 50), title, fill=gold, font=font_title)
+    bbox = draw.textbbox((0, 0), title, font=font_big)
+    x = (width - (bbox[2] - bbox[0])) // 2
+    draw.text((x, 50), title, fill=gold, font=font_big)
 
-    # Сертификат
-    cert = "СЕРТИФИКАТ"
-    bbox = draw.textbbox((0, 0), cert, font=font_title)
-    draw.text(((width - (bbox[2] - bbox[0])) // 2, 110), cert, fill=dark, font=font_title)
+    # Слово "СЕРТИФИКАТ"
+    cert_text = "СЕРТИФИКАТ"
+    bbox = draw.textbbox((0, 0), cert_text, font=font_big)
+    x = (width - (bbox[2] - bbox[0])) // 2
+    draw.text((x, 130), cert_text, fill=dark, font=font_big)
 
-    # Линия
-    draw.line([(250, 160), (width - 250, 160)], fill=gold, width=2)
+    # Декоративная линия
+    draw.line([(300, 200), (width - 300, 200)], fill=gold, width=2)
 
-    # Текст
+    # Текст "Настоящий сертификат подтверждает, что"
     text1 = "Настоящий сертификат подтверждает, что"
-    bbox = draw.textbbox((0, 0), text1, font=font_text)
-    draw.text(((width - (bbox[2] - bbox[0])) // 2, 190), text1, fill=gray, font=font_text)
+    bbox = draw.textbbox((0, 0), text1, font=font_medium)
+    x = (width - (bbox[2] - bbox[0])) // 2
+    draw.text((x, 230), text1, fill=gray, font=font_medium)
 
-    # Имя (крупно)
+    # ИМЯ ПОЛЬЗОВАТЕЛЯ (крупно)
     display_name = user_name[:30]
     bbox = draw.textbbox((0, 0), display_name, font=font_name)
-    draw.text(((width - (bbox[2] - bbox[0])) // 2, 250), display_name, fill=dark, font=font_name)
+    x = (width - (bbox[2] - bbox[0])) // 2
+    draw.text((x, 300), display_name, fill=dark, font=font_name)
 
     # Линия под именем
-    draw.line([(width // 2 - 200, 310), (width // 2 + 200, 310)], fill=gold, width=2)
+    draw.line([(width // 2 - 250, 380), (width // 2 + 250, 380)], fill=gold, width=2)
 
-    # Текст
+    # Текст "успешно завершил(а) программу"
     text2 = "успешно завершил(а) программу"
-    bbox = draw.textbbox((0, 0), text2, font=font_text)
-    draw.text(((width - (bbox[2] - bbox[0])) // 2, 340), text2, fill=gray, font=font_text)
+    bbox = draw.textbbox((0, 0), text2, font=font_medium)
+    x = (width - (bbox[2] - bbox[0])) // 2
+    draw.text((x, 410), text2, fill=gray, font=font_medium)
 
     # Название услуги
     display_service = service_name[:40]
-    bbox = draw.textbbox((0, 0), display_service, font=font_bold)
-    draw.text(((width - (bbox[2] - bbox[0])) // 2, 390), display_service, fill=gold, font=font_bold)
+    bbox = draw.textbbox((0, 0), display_service, font=font_medium)
+    x = (width - (bbox[2] - bbox[0])) // 2
+    draw.text((x, 460), display_service, fill=gold, font=font_medium)
 
     # Описание
     desc = "с полным сопровождением и гарантией качества"
-    bbox = draw.textbbox((0, 0), desc, font=font_text)
-    draw.text(((width - (bbox[2] - bbox[0])) // 2, 440), desc, fill=gray, font=font_text)
+    bbox = draw.textbbox((0, 0), desc, font=font_medium)
+    x = (width - (bbox[2] - bbox[0])) // 2
+    draw.text((x, 510), desc, fill=gray, font=font_medium)
 
+    # ===== ИНФОРМАЦИЯ ВНИЗУ =====
     # Код заказа
     code_text = f"Код заказа: {order_code}"
     bbox = draw.textbbox((0, 0), code_text, font=font_small)
-    draw.text((50, height - 60), code_text, fill=gray, font=font_small)
+    draw.text((60, height - 70), code_text, fill=gray, font=font_small)
 
     # Дата
     date_text = f"Дата выдачи: {completion_date}"
     bbox = draw.textbbox((0, 0), date_text, font=font_small)
-    draw.text((width - (bbox[2] - bbox[0]) - 50, height - 60), date_text, fill=gray, font=font_small)
+    draw.text((width - (bbox[2] - bbox[0]) - 60, height - 70), date_text, fill=gray, font=font_small)
 
     # Подписи
-    draw.text((180, height - 120), "___________ Диспетчер", fill=gray, font=font_small)
-    draw.text((width - 320, height - 120), "___________ CEO", fill=gray, font=font_small)
+    draw.text((200, height - 130), "___________ Диспетчер", fill=gray, font=font_small)
+    draw.text((width - 350, height - 130), "___________ CEO", fill=gray, font=font_small)
+
+    # ===== ЗОЛОТАЯ ПЕЧАТЬ =====
+    seal_x = width - 160
+    seal_y = height - 160
+    seal_r = 70
+
+    # Круг
+    draw.ellipse(
+        [(seal_x - seal_r, seal_y - seal_r), (seal_x + seal_r, seal_y + seal_r)],
+        outline=gold,
+        width=3
+    )
+    draw.ellipse(
+        [(seal_x - seal_r + 15, seal_y - seal_r + 15), (seal_x + seal_r - 15, seal_y + seal_r - 15)],
+        outline=gold,
+        width=1
+    )
+
+    # Текст в печати
+    seal_text = "★ SOPRANIDI ★"
+    bbox = draw.textbbox((0, 0), seal_text, font=font_small)
+    x = seal_x - (bbox[2] - bbox[0]) // 2
+    draw.text((x, seal_y - 15), seal_text, fill=gold, font=font_small)
+
+    # ===== ДЕКОРАТИВНЫЙ УЗОР =====
+    for i in range(5):
+        x = 120 + i * 240
+        y = 640
+        draw.text((x, y), "✦", fill=light_gold, font=font_small)
 
     # Сохраняем
     output = BytesIO()
-    img.save(output, format='PNG')
+    img.save(output, format='PNG', quality=95)
     output.seek(0)
     return output
 
