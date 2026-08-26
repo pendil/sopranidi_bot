@@ -2333,7 +2333,7 @@ async def cb_service_edit(callback: CallbackQuery):
         service_id = int(callback.data.split("_")[2])
     except (ValueError, IndexError):
         await callback.answer("❌ Ошибка: неверный формат данных", show_alert=True)
-        return service = await run_db(get_service, service_id)
+        service = await run_db(get_service, service_id)
     if not service:
         await callback.answer("❌ Услуга не найдена", show_alert=True)
         return
