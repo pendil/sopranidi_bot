@@ -19,6 +19,27 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+# ===================== PILLOW (С ПРИНУДИТЕЛЬНОЙ УСТАНОВКОЙ) =====================
+PIL_AVAILABLE = False
+
+try:
+    import PIL
+    from PIL import Image, ImageDraw, ImageFont
+    PIL_AVAILABLE = True
+    print(f"✅ Pillow загружен. Версия: {PIL.__version__}")
+except ImportError:
+    print("⚠️ Pillow не загружен. Пытаемся установить...")
+    import subprocess
+    import sys
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "Pillow"])
+        import PIL
+        from PIL import Image, ImageDraw, ImageFont
+        PIL_AVAILABLE = True
+        print(f"✅ Pillow установлен и загружен! Версия: {PIL.__version__}")
+    except Exception as e:
+        print(f"❌ Не удалось установить Pillow: {e}")
+
 # ===================== ДЛЯ ГЕНЕРАЦИИ СЕРТИФИКАТОВ =====================
 try:
     from PIL import Image, ImageDraw, ImageFont
