@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Сертификат Sopranidi Corp.</title>
+    <style>
+        @page { size: A4 landscape; margin: 0; }
+        body { margin: 0; padding: 0; font-family: 'Georgia', serif; background: #fff; display: flex; justify-content: center; align-items: center; height: 100vh; }
+        .certificate { width: 1120px; height: 790px; padding: 40px; background: #ffffff; border: 8px solid #D4AF37; border-radius: 20px; box-shadow: 0 20px 60px rgba(0,0,0,0.15); position: relative; overflow: hidden; }
+        .certificate::before { content: ''; position: absolute; top: 20px; left: 20px; right: 20px; bottom: 20px; border: 2px solid #D4AF37; border-radius: 12px; pointer-events: none; }
+        .bg-pattern { position: absolute; top: 0; left: 0; right: 0; bottom: 0; opacity: 0.04; background-image: radial-gradient(circle at 20% 50%, #D4AF37 1px, transparent 1px), radial-gradient(circle at 80% 50%, #D4AF37 1px, transparent 1px); background-size: 60px 60px; pointer-events: none; }
+        .content { position: relative; z-index: 1; text-align: center; height: 100%; display: flex; flex-direction: column; justify-content: center; padding: 20px; }
+        .logo { font-size: 18px; letter-spacing: 6px; color: #D4AF37; font-weight: bold; margin-bottom: 10px; text-transform: uppercase; }
+        .logo-icon { font-size: 36px; margin-bottom: 5px; }
+        .title { font-size: 58px; font-weight: bold; color: #1a1a2e; letter-spacing: 8px; margin: 5px 0; }
+        .subtitle { font-size: 26px; color: #D4AF37; letter-spacing: 4px; margin-bottom: 15px; border-top: 2px solid #D4AF37; border-bottom: 2px solid #D4AF37; display: inline-block; padding: 5px 30px; }
+        .gold-line { width: 200px; height: 2px; background: #D4AF37; margin: 10px auto; }
+        .text { font-size: 18px; color: #555; margin: 5px 0; }
+        .recipient-name { font-size: 52px; font-weight: bold; color: #1a1a2e; margin: 10px 0; letter-spacing: 3px; text-transform: uppercase; }
+        .service-name { font-size: 26px; color: #D4AF37; font-weight: bold; margin: 5px 0; }
+        .service-desc { font-size: 16px; color: #888; margin: 3px 0; }
+        .footer { margin-top: auto; display: flex; justify-content: space-between; align-items: flex-end; padding-top: 20px; border-top: 1px solid #eee; }
+        .signature { text-align: center; font-size: 14px; color: #777; }
+        .signature .name { font-weight: bold; color: #333; margin-top: 20px; font-size: 16px; }
+        .signature .line { width: 180px; border-top: 2px solid #D4AF37; margin: 5px auto; }
+        .code-date { text-align: right; font-size: 13px; color: #aaa; }
+        .code-date .code { font-weight: bold; color: #D4AF37; font-size: 16px; }
+        .seal { position: absolute; bottom: 50px; right: 60px; width: 100px; height: 100px; border: 3px solid #D4AF37; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: bold; color: #D4AF37; text-align: center; line-height: 1.4; background: rgba(212, 175, 55, 0.05); }
+        .seal span { display: block; font-size: 20px; }
+        @media print { .certificate { box-shadow: none; border: 4px solid #D4AF37; } }
+    </style>
+</head>
+<body>
+    <div class="certificate">
+        <div class="bg-pattern"></div>
+        <div class="content">
+            <div>
+                <div class="logo-icon">🏛️</div>
+                <div class="logo">SOPRANIDI CORPORATION</div>
+                <div class="title">СЕРТИФИКАТ</div>
+                <div class="subtitle">ОБ УСПЕШНОМ ЗАВЕРШЕНИИ</div>
+                <div class="gold-line"></div>
+            </div>
+            <div>
+                <div class="text">Настоящий сертификат подтверждает, что</div>
+                <div class="recipient-name">{{ user_name }}</div>
+                <div class="gold-line"></div>
+                <div class="text">успешно завершил(а) программу</div>
+                <div class="service-name">{{ service_name }}</div>
+                <div class="service-desc">с полным сопровождением и гарантией качества</div>
+            </div>
+            <div class="footer">
+                <div class="signature"><div class="line"></div><div>Диспетчер</div><div class="name">___________</div></div>
+                <div class="signature"><div class="line"></div><div>CEO</div><div class="name">___________</div></div>
+                <div class="code-date"><div>Код заказа:</div><div class="code">{{ order_code }}</div><br><div>Дата выдачи:</div><div>{{ completion_date }}</div></div>
+            </div>
+            <div class="seal"><span>✦</span>SOPRANIDI ★</div>
+        </div>
+    </div>
+</body>
+</html>

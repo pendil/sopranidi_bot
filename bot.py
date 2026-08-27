@@ -19,6 +19,17 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+# ===================== ДЛЯ ГЕНЕРАЦИИ PDF СЕРТИФИКАТОВ =====================
+try:
+    from weasyprint import HTML
+    from weasyprint.text.fonts import FontConfiguration
+
+    PDF_AVAILABLE = True
+    print("✅ weasyprint загружен")
+except ImportError:
+    PDF_AVAILABLE = False
+    print("⚠️ weasyprint не установлен. Генерация PDF будет недоступна.")
+
 # ===================== ЗАГРУЗКА .ENV =====================
 try:
     from dotenv import load_dotenv
@@ -48,6 +59,7 @@ GREEK_LETTERS = [
 BASE_DIR = Path(__file__).resolve().parent
 LOGO_PATH = BASE_DIR / "logo.jpg"
 EXAMPLES_DIR = BASE_DIR / "examples"
+TEMPLATE_PATH = BASE_DIR / "certificate_template.html"
 
 # ===================== НАСТРОЙКА БАЗЫ ДАННЫХ =====================
 DATA_DIR = "/persistent" if os.path.exists("/persistent") else str(BASE_DIR / "data")
@@ -64,7 +76,7 @@ ADMINS = [int(x.strip()) for x in _admins_raw.split(",") if x.strip().isdigit()]
 if not ADMINS:
     logging.warning("⚠️ Переменная окружения ADMINS пуста!")
 
-DISPATCHER_USERNAME = os.getenv("DISPATCHER_USERNAME", "@sopranidi_support")
+DISPATCHER_USERNAME = os.getenv("DISPATCHER_USERNAME", "@sopranidis_support")
 CEO_USERNAME = os.getenv("CEO_USERNAME", "@sopranidi")
 CHANNEL_LINK = os.getenv("CHANNEL_LINK", "https://t.me/sopranidi_corporation")
 BOT_LINK = os.getenv("BOT_LINK", "https://t.me/sopranidi_bot")
@@ -119,11 +131,44 @@ def format_price_with_discount(original_price: int, discount: int) -> str:
     return f"<s>{original_price} ₽</s> → <b>{new_price} ₽</b> 🎉"
 
 
+# ===================== ГЕНЕРАЦИЯ PDF СЕРТИФИКАТА =====================
+def generate_certificate_pdf(user_name: str, service_name: str, completion_date: str, order_code: str) -> BytesIO:
+    """Генерирует PDF-сертификат из HTML-шаблона"""
+    if not PDF_AVAILABLE:
+        return None
+
+    if not TEMPLATE_PATH.exists():
+        logging.error(f"❌ Шаблон сертификата не найден: {TEMPLATE_PATH}")
+        return None
+
+    try:
+        with open(TEMPLATE_PATH, 'r', encoding='utf-8') as f:
+            html_content = f.read()
+
+        html_content = html_content.replace('{{ user_name }}', user_name)
+        html_content = html_content.replace('{{ service_name }}', service_name)
+        html_content = html_content.replace('{{ completion_date }}', completion_date)
+        html_content = html_content.replace('{{ order_code }}', order_code)
+
+        font_config = FontConfiguration()
+        pdf_bytes = HTML(string=html_content).write_pdf(font_config=font_config)
+
+        output = BytesIO()
+        output.write(pdf_bytes)
+        output.seek(0)
+        return output
+
+    except Exception as e:
+        logging.error(f"❌ Ошибка генерации PDF: {e}")
+        return None
+
+
 # ===================== БАЗА ДАННЫХ =====================
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
 
+    # Таблица пользователей
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -156,6 +201,7 @@ def init_db():
     if "last_birthday_greet_year" not in columns:
         cur.execute("ALTER TABLE users ADD COLUMN last_birthday_greet_year TEXT DEFAULT ''")
 
+    # Таблица заказов
     cur.execute("""
         CREATE TABLE IF NOT EXISTS orders (
             order_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -176,6 +222,7 @@ def init_db():
         )
     """)
 
+    # Таблица услуг
     cur.execute("""
         CREATE TABLE IF NOT EXISTS services (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -208,6 +255,56 @@ def init_db():
                 (name, desc, price, datetime.now().isoformat())
             )
 
+    # ===== НОВЫЕ ТАБЛИЦЫ =====
+
+    # Таблица администраторов
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS admins (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER UNIQUE,
+            username TEXT,
+            first_name TEXT,
+            role TEXT DEFAULT 'admin',
+            added_by INTEGER,
+            added_at TEXT,
+            is_active INTEGER DEFAULT 1
+        )
+    """)
+
+    # Добавляем первого супер-админа из .env
+    cur.execute("SELECT COUNT(*) FROM admins")
+    if cur.fetchone()[0] == 0 and ADMINS:
+        cur.execute("""
+            INSERT OR IGNORE INTO admins (user_id, username, first_name, role, added_at)
+            VALUES (?, ?, ?, 'super_admin', ?)
+        """, (ADMINS[0], None, 'Главный админ', datetime.now().isoformat()))
+        logging.info(f"✅ Супер-админ {ADMINS[0]} добавлен в БД")
+
+    # Таблица сообщений чата
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            admin_id INTEGER,
+            message TEXT,
+            is_from_admin INTEGER DEFAULT 0,
+            is_read INTEGER DEFAULT 0,
+            created_at TEXT,
+            FOREIGN KEY(user_id) REFERENCES users(user_id)
+        )
+    """)
+
+    # Таблица активных чатов
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS active_chats (
+            user_id INTEGER PRIMARY KEY,
+            last_message_at TEXT,
+            is_closed INTEGER DEFAULT 0,
+            closed_by INTEGER
+        )
+    """)
+
+    # Голосования
     cur.execute("""
         CREATE TABLE IF NOT EXISTS polls (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -232,6 +329,7 @@ def init_db():
         )
     """)
 
+    # Промокоды
     cur.execute("""
         CREATE TABLE IF NOT EXISTS promocodes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -256,6 +354,7 @@ def init_db():
         )
     """)
 
+    # Акции
     cur.execute("""
         CREATE TABLE IF NOT EXISTS promotions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -269,6 +368,7 @@ def init_db():
         )
     """)
 
+    # Логи
     cur.execute("""
         CREATE TABLE IF NOT EXISTS user_logs (
             log_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -296,8 +396,170 @@ def init_db():
 
 
 # ===================== ФУНКЦИИ РАБОТЫ С БАЗОЙ =====================
+
+# ---- УПРАВЛЕНИЕ АДМИНАМИ ----
+def get_all_admins():
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT user_id, username, first_name, role, added_at
+        FROM admins WHERE is_active = 1 ORDER BY role DESC, added_at ASC
+    """)
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def get_admin(user_id: int):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("SELECT user_id, username, first_name, role, added_at FROM admins WHERE user_id = ? AND is_active = 1",
+                (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def add_admin(user_id: int, username: str = None, first_name: str = None, added_by: int = None):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT OR IGNORE INTO admins (user_id, username, first_name, role, added_by, added_at)
+        VALUES (?, ?, ?, 'admin', ?, ?)
+    """, (user_id, username, first_name, added_by, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+
+def remove_admin(user_id: int):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("UPDATE admins SET is_active = 0 WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+
+def is_admin_db(user_id: int) -> bool:
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM admins WHERE user_id = ? AND is_active = 1", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row is not None
+
+
+def is_super_admin(user_id: int) -> bool:
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM admins WHERE user_id = ? AND role = 'super_admin' AND is_active = 1", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row is not None
+
+
+# ---- ВНУТРЕННИЙ ЧАТ ----
+def send_message(user_id: int, admin_id: int, message: str, is_from_admin: int = 0):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO chat_messages (user_id, admin_id, message, is_from_admin, created_at)
+        VALUES (?, ?, ?, ?, ?)
+    """, (user_id, admin_id, message, is_from_admin, datetime.now().isoformat()))
+
+    cur.execute("""
+        INSERT OR REPLACE INTO active_chats (user_id, last_message_at)
+        VALUES (?, ?)
+    """, (user_id, datetime.now().isoformat()))
+
+    conn.commit()
+    conn.close()
+
+
+def get_chat_history(user_id: int, limit: int = 50):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, message, is_from_admin, created_at
+        FROM chat_messages
+        WHERE user_id = ?
+        ORDER BY created_at ASC
+        LIMIT ?
+    """, (user_id, limit))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def get_unread_count(user_id: int = None):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    if user_id:
+        cur.execute("""
+            SELECT COUNT(*) FROM chat_messages
+            WHERE user_id = ? AND is_from_admin = 0 AND is_read = 0
+        """, (user_id,))
+    else:
+        cur.execute("""
+            SELECT COUNT(*) FROM chat_messages
+            WHERE is_from_admin = 0 AND is_read = 0
+        """)
+    count = cur.fetchone()[0]
+    conn.close()
+    return count
+
+
+def mark_as_read(user_id: int, admin_id: int):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE chat_messages
+        SET is_read = 1
+        WHERE user_id = ? AND is_from_admin = 0 AND is_read = 0
+    """, (user_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_active_chats():
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT ac.user_id, u.username, u.first_name, ac.last_message_at,
+               (SELECT COUNT(*) FROM chat_messages WHERE user_id = ac.user_id AND is_from_admin = 0 AND is_read = 0) as unread
+        FROM active_chats ac
+        JOIN users u ON ac.user_id = u.user_id
+        WHERE ac.is_closed = 0
+        ORDER BY ac.last_message_at DESC
+    """)
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def close_chat(user_id: int, admin_id: int):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE active_chats
+        SET is_closed = 1, closed_by = ?
+        WHERE user_id = ?
+    """, (admin_id, user_id))
+    conn.commit()
+    conn.close()
+
+
+def get_user_by_id(user_id: int):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("SELECT user_id, username, first_name, last_name FROM users WHERE user_id = ?", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+# ---- ОСТАЛЬНЫЕ ФУНКЦИИ ----
 def is_admin(user_id: int) -> bool:
-    return user_id in ADMINS
+    return is_admin_db(user_id)
 
 
 def add_user(user_id: int, username: str, first_name: str, last_name: str = ""):
@@ -1034,6 +1296,8 @@ def admin_menu_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="🏷️ Промокоды", callback_data="admin_promocodes")
     builder.button(text="🗑️ Удалить старые заказы", callback_data="admin_delete_old")
     builder.button(text="📋 Логи", callback_data="admin_logs")
+    builder.button(text="👑 Управление админами", callback_data="admin_admins")
+    builder.button(text="💬 Чаты с клиентами", callback_data="admin_chats")
     builder.button(text="🔙 В главное меню", callback_data="main_menu")
     builder.adjust(2, 2, 2, 1)
     return builder.as_markup()
@@ -1147,7 +1411,8 @@ def orders_keyboard(orders: list, page: int = 0) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def order_detail_keyboard(order_id: int, status: str, is_urgent: int = 0) -> InlineKeyboardMarkup:
+def order_detail_keyboard(order_id: int, status: str, is_urgent: int = 0,
+                          is_premier: bool = False) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     if status == "pending":
         builder.button(text="✅ Подтвердить оплату", callback_data=f"confirm_payment_{order_id}")
@@ -1162,6 +1427,8 @@ def order_detail_keyboard(order_id: int, status: str, is_urgent: int = 0) -> Inl
     elif status == "paid":
         builder.button(text="📎 Прикрепить файл", callback_data=f"attach_file_{order_id}")
         builder.button(text="❌ Удалить заказ", callback_data=f"delete_order_{order_id}")
+        if is_premier:
+            builder.button(text="🏆 Выдать сертификат", callback_data=f"premier_certificate_{order_id}")
     builder.button(text="🔙 Назад к заказам", callback_data="admin_orders")
     builder.adjust(1)
     return builder.as_markup()
@@ -1339,11 +1606,120 @@ async def cmd_help(message: Message):
 /my_orders - Мои заказы
 /profile - Мой профиль
 /set_birthday - Указать дату рождения
+/policy - Политика конфиденциальности
 
 Для администраторов:
 /admin - Админ-панель
 """
     await send_safe_message(message, text, back_to_main_keyboard(), "HTML")
+
+
+@dp.message(Command("policy"))
+async def cmd_policy(message: Message):
+    """Показывает политику конфиденциальности"""
+    text = """
+📄 <b>ПОЛИТИКА КОНФИДЕНЦИАЛЬНОСТИ</b>
+<b>Sopranidi Corporation</b>
+
+1. <b>Общие положения</b>
+Настоящая Политика регулирует порядок сбора, хранения и обработки персональных данных пользователей Telegram-бота Sopranidi Corp.
+
+2. <b>Какие данные мы собираем</b>
+• Telegram ID, username, имя, фамилия
+• Данные о заказах и истории обращений
+• Технические данные для улучшения сервиса
+
+3. <b>Как мы используем данные</b>
+• Для обработки заказов и технической поддержки
+• Для улучшения качества обслуживания
+• Для информирования (только с вашего согласия)
+
+4. <b>Хранение данных</b>
+Все данные хранятся в зашифрованной базе данных на защищённых серверах. Срок хранения — 3 года с момента последнего взаимодействия.
+
+5. <b>Ваши права</b>
+Вы имеете право:
+• Знать, какие данные мы храним (/mydata)
+• Исправить неточные данные (/profile)
+• Удалить свои данные (/deletedata)
+• Отозвать согласие (/revoke)
+
+6. <b>Контакты</b>
+📌 Диспетчер: @sopranidis_support
+🏛️ CEO: @sopranidi
+📧 Email: support@sopranidi.com
+
+<i>Дата обновления: 27.08.2026</i>
+"""
+    keyboard = InlineKeyboardBuilder()
+    keyboard.button(text="📄 Полная Политика", callback_data="show_full_policy")
+    keyboard.button(text="🔙 Назад", callback_data="main_menu")
+    keyboard.adjust(1)
+
+    await message.answer(text, reply_markup=keyboard.as_markup(), parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "show_full_policy")
+async def cb_full_policy(callback: CallbackQuery):
+    """Показывает полную политику конфиденциальности"""
+    text = """
+📄 <b>ПОЛИТИКА КОНФИДЕНЦИАЛЬНОСТИ (ПОЛНАЯ ВЕРСИЯ)</b>
+<b>Sopranidi Corporation</b>
+
+1. <b>ОБЩИЕ ПОЛОЖЕНИЯ</b>
+1.1. Настоящая Политика конфиденциальности регулирует порядок сбора, хранения, обработки и защиты персональных данных пользователей Telegram-бота Sopranidi Corp.
+1.2. Использование Бота означает безоговорочное согласие Пользователя с условиями настоящей Политики.
+
+2. <b>КАКИЕ ДАННЫЕ МЫ СОБИРАЕМ</b>
+• Идентификационные данные: Telegram ID, username, имя, фамилия
+• Контактные данные: Telegram ID (используется как основной канал связи)
+• Данные о заказах: выбранные услуги, дата заказа, сумма, статус
+• История взаимодействий: сообщения в чате, дата и время обращений
+• Технические данные: дата и время использования Бота, действия в интерфейсе
+• Дополнительные данные: дата рождения (по желанию), использованные промокоды
+
+Мы НЕ собираем и НЕ храним: платёжные данные, паспортные данные, биометрические данные, содержимое выполненных работ.
+
+3. <b>КАК МЫ ИСПОЛЬЗУЕМ ВАШИ ДАННЫЕ</b>
+• Обработка заказов — создание, выполнение и доставка заказов
+• Техническая поддержка — ответы на вопросы, помощь в использовании Бота
+• Улучшение сервиса — анализ использования Бота для повышения качества
+• Информирование — уведомления о статусе заказа, акциях и новостях (только с согласия)
+• Безопасность — защита от мошенничества и несанкционированного доступа
+
+4. <b>ХРАНЕНИЕ ДАННЫХ</b>
+• Все данные хранятся в зашифрованной базе данных на защищённых серверах
+• Данные хранятся в течение 3 лет с момента последнего взаимодействия
+• Используются меры защиты: шифрование (AES-256), ограниченный доступ, резервное копирование
+
+5. <b>ПРАВА ПОЛЬЗОВАТЕЛЯ</b>
+В соответствии с Федеральным законом № 152-ФЗ «О персональных данных»:
+• /mydata — узнать, какие данные мы храним
+• /profile — исправить неточные данные
+• /deletedata — удалить свои данные
+• /revoke — отозвать согласие
+• /exportdata — получить копию данных
+
+6. <b>ПЕРЕДАЧА ДАННЫХ ТРЕТЬИМ ЛИЦАМ</b>
+Мы НЕ продаём, не обмениваем и не передаём ваши персональные данные третьим лицам. Исключения: по требованию уполномоченных государственных органов, для защиты прав Компании, при реорганизации или продаже бизнеса.
+
+7. <b>ЗАЩИТА ДАННЫХ НЕСОВЕРШЕННОЛЕТНИХ</b>
+Бот предназначен для пользователей старше 14 лет. Мы не собираем осознанно данные о пользователях младше 14 лет.
+
+8. <b>КОНТАКТЫ</b>
+📌 Диспетчер: @sopranidis_support
+🏛️ CEO: @sopranidi
+📧 Email: support@sopranidi.com
+📢 Канал: https://t.me/sopranidi_corporation
+
+<i>Дата обновления: 27.08.2026</i>
+"""
+    keyboard = InlineKeyboardBuilder()
+    keyboard.button(text="🔙 Назад", callback_data="main_menu")
+    keyboard.adjust(1)
+
+    await callback.message.edit_text(text, reply_markup=keyboard.as_markup(), parse_mode="HTML")
+    await callback.answer()
 
 
 @dp.message(Command("set_birthday"))
@@ -1442,6 +1818,45 @@ async def cmd_broadcast(message: Message, state: FSMContext):
                  f"Отправил рассылку {sent} пользователям ({failed} неудачно)")
     await message.answer(f"✅ Рассылка выполнена. Отправлено {sent} пользователям, не доставлено {failed}.",
                          parse_mode="HTML")
+
+
+# ===================== ОБРАБОТЧИК СООБЩЕНИЙ ОТ КЛИЕНТОВ =====================
+@dp.message()
+async def handle_client_message(message: Message):
+    """Обработчик сообщений от клиентов"""
+    user_id = message.from_user.id
+
+    if await run_db(is_admin_db, user_id):
+        return
+
+    if not message.text:
+        return
+
+    await run_db(send_message, user_id, None, message.text, 0)
+    await run_db(add_user_log, user_id, "chat_message", f"Отправил сообщение: {message.text[:50]}...")
+
+    admins = await run_db(get_all_admins)
+    user = await run_db(get_user, user_id)
+    name = user[1] or user[2] or str(user_id)
+
+    for admin in admins:
+        try:
+            await bot.send_message(
+                admin[0],
+                f"📩 <b>Новое сообщение от клиента!</b>\n\n"
+                f"👤 {escape_html(name)}\n"
+                f"💬 {escape_html(message.text)}\n\n"
+                f"🔹 Нажмите <b>💬 Чаты с клиентами</b> в админ-панели, чтобы ответить.",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logging.warning(f"Не удалось уведомить админа {admin[0]}: {e}")
+
+    await message.answer(
+        "✅ Ваше сообщение отправлено администратору. Ожидайте ответа!\n"
+        "📌 Вы можете продолжать диалог в этом чате.",
+        parse_mode="HTML"
+    )
 
 
 # ===================== АКЦИИ (ДЛЯ ПОЛЬЗОВАТЕЛЕЙ) =====================
@@ -1686,6 +2101,269 @@ async def cb_admin_stats(callback: CallbackQuery):
     await callback.answer()
 
 
+# ===================== АДМИН: УПРАВЛЕНИЕ АДМИНАМИ =====================
+@dp.callback_query(F.data == "admin_admins")
+async def cb_admin_admins(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    admins = await run_db(get_all_admins)
+    text = "👑 <b>Управление администраторами</b>\n\n"
+
+    if admins:
+        for admin in admins:
+            user_id, username, first_name, role, added_at = admin
+            role_icon = "⭐" if role == "super_admin" else "👤"
+            name = username or first_name or str(user_id)
+            text += f"{role_icon} {name} (ID: {user_id})\n"
+            text += f"   Роль: {role}\n"
+            text += f"   Добавлен: {added_at[:10]}\n\n"
+    else:
+        text += "Нет администраторов.\n"
+
+    keyboard = InlineKeyboardBuilder()
+    if is_super_admin(callback.from_user.id):
+        keyboard.button(text="➕ Добавить админа", callback_data="admin_add")
+        keyboard.button(text="🗑️ Удалить админа", callback_data="admin_remove")
+    else:
+        keyboard.button(text="➕ Добавить админа", callback_data="admin_add")
+    keyboard.button(text="🔙 Назад", callback_data="admin_menu")
+    keyboard.adjust(1)
+
+    await update_message(callback, text, keyboard.as_markup(), "HTML")
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "admin_add")
+async def cb_admin_add(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        "👑 <b>Добавление администратора</b>\n\n"
+        "Введите ID пользователя (например, 123456789):\n"
+        "Или отправьте ссылку на профиль: t.me/username",
+        reply_markup=back_to_admin_keyboard(),
+        parse_mode="HTML"
+    )
+    await state.set_state("waiting_for_admin_id")
+
+
+@dp.message(StateFilter("waiting_for_admin_id"))
+async def process_admin_add(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Нет доступа.", parse_mode="HTML")
+        await state.clear()
+        return
+
+    text = message.text.strip()
+    user_id = None
+
+    if text.isdigit():
+        user_id = int(text)
+    elif "t.me/" in text:
+        username = text.split("t.me/")[-1].replace("/", "").strip()
+        conn = sqlite3.connect(DB_NAME)
+        cur = conn.cursor()
+        cur.execute("SELECT user_id FROM users WHERE username = ?", (username,))
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            user_id = row[0]
+
+    if not user_id:
+        await message.answer("❌ Не удалось определить ID пользователя. Попробуйте ещё раз:", parse_mode="HTML")
+        return
+
+    if await run_db(is_admin_db, user_id):
+        await message.answer("❌ Этот пользователь уже является админом.", parse_mode="HTML")
+        await state.clear()
+        return
+
+    user = await run_db(get_user_by_id, user_id)
+    username = user[1] if user else None
+    first_name = user[2] if user else None
+
+    await run_db(add_admin, user_id, username, first_name, message.from_user.id)
+    await run_db(add_admin_log, message.from_user.id, "add_admin", f"Добавил админа {user_id}")
+
+    await message.answer(
+        f"✅ Администратор <b>{username or first_name or str(user_id)}</b> успешно добавлен!",
+        reply_markup=admin_menu_keyboard(),
+        parse_mode="HTML"
+    )
+    await state.clear()
+
+
+@dp.callback_query(F.data == "admin_remove")
+async def cb_admin_remove(callback: CallbackQuery, state: FSMContext):
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer("⛔ Только супер-админ может удалять", show_alert=True)
+        return
+
+    admins = await run_db(get_all_admins)
+    text = "👑 <b>Выберите админа для удаления:</b>\n\n"
+
+    keyboard = InlineKeyboardBuilder()
+    for admin in admins:
+        user_id, username, first_name, role, _ = admin
+        if role == "super_admin":
+            continue
+        name = username or first_name or str(user_id)
+        keyboard.button(text=f"🗑️ {name}", callback_data=f"admin_remove_{user_id}")
+
+    keyboard.button(text="🔙 Назад", callback_data="admin_admins")
+    keyboard.adjust(1)
+
+    await update_message(callback, text, keyboard.as_markup(), "HTML")
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("admin_remove_"))
+async def cb_admin_remove_confirm(callback: CallbackQuery):
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer("⛔ Только супер-админ может удалять", show_alert=True)
+        return
+
+    user_id = int(callback.data.split("_")[2])
+    if user_id == callback.from_user.id:
+        await callback.answer("❌ Нельзя удалить самого себя", show_alert=True)
+        return
+
+    await run_db(remove_admin, user_id)
+    await run_db(add_admin_log, callback.from_user.id, "remove_admin", f"Удалил админа {user_id}")
+
+    await callback.answer("✅ Админ удалён!", show_alert=True)
+    await cb_admin_admins(callback)
+
+
+# ===================== АДМИН: ЧАТЫ С КЛИЕНТАМИ =====================
+@dp.callback_query(F.data == "admin_chats")
+async def cb_admin_chats(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    chats = await run_db(get_active_chats)
+    unread = await run_db(get_unread_count)
+
+    text = f"💬 <b>Активные чаты</b>\n\n"
+    text += f"📬 Непрочитанных сообщений: <b>{unread}</b>\n\n"
+
+    if not chats:
+        text += "Активных чатов нет."
+        await update_message(callback, text, admin_menu_keyboard(), "HTML")
+        await callback.answer()
+        return
+
+    keyboard = InlineKeyboardBuilder()
+    for chat in chats:
+        user_id, username, first_name, last_message, unread_count = chat
+        name = username or first_name or str(user_id)
+        unread_icon = "🔴" if unread_count > 0 else "🟢"
+        keyboard.button(
+            text=f"{unread_icon} {name} ({unread_count} непрочитанных)" if unread_count > 0 else f"{unread_icon} {name}",
+            callback_data=f"chat_open_{user_id}"
+        )
+
+    keyboard.button(text="🔙 Назад", callback_data="admin_menu")
+    keyboard.adjust(1)
+
+    await update_message(callback, text, keyboard.as_markup(), "HTML")
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("chat_open_"))
+async def cb_chat_open(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    user_id = int(callback.data.split("_")[2])
+    user = await run_db(get_user_by_id, user_id)
+    name = user[1] or user[2] or str(user_id)
+
+    await run_db(mark_as_read, user_id, callback.from_user.id)
+
+    history = await run_db(get_chat_history, user_id)
+
+    text = f"💬 <b>Чат с {escape_html(name)}</b>\n\n"
+
+    if history:
+        for msg_id, msg, is_from_admin, created_at in history[-20:]:
+            time = datetime.fromisoformat(created_at).strftime("%H:%M")
+            sender = "👤 Админ" if is_from_admin else "👤 Клиент"
+            text += f"{sender} [{time}]: {escape_html(msg)}\n"
+    else:
+        text += "История сообщений пуста.\n"
+
+    text += "\n✏️ Напишите сообщение:"
+
+    keyboard = InlineKeyboardBuilder()
+    keyboard.button(text="❌ Закрыть чат", callback_data=f"chat_close_{user_id}")
+    keyboard.button(text="🔙 Назад", callback_data="admin_chats")
+    keyboard.adjust(1)
+
+    await update_message(callback, text, keyboard.as_markup(), "HTML")
+
+    await state.set_state("chat_sending")
+    await state.update_data(chat_user_id=user_id)
+
+    await callback.answer()
+
+
+@dp.message(StateFilter("chat_sending"))
+async def chat_send_message(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Нет доступа", parse_mode="HTML")
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    user_id = data.get("chat_user_id")
+
+    if not user_id:
+        await message.answer("❌ Чат не найден.", parse_mode="HTML")
+        await state.clear()
+        return
+
+    if message.text and message.text.startswith("/"):
+        return
+
+    await run_db(send_message, user_id, message.from_user.id, message.text, 1)
+    await run_db(add_admin_log, message.from_user.id, "chat_message",
+                 f"Отправил сообщение пользователю {user_id}: {message.text[:50]}...")
+
+    try:
+        await bot.send_message(
+            user_id,
+            f"📩 <b>Сообщение от администратора</b>\n\n{escape_html(message.text)}\n\n✏️ Вы можете ответить в этом чате.",
+            parse_mode="HTML"
+        )
+        await message.answer("✅ Сообщение отправлено!", parse_mode="HTML")
+    except Exception as e:
+        logging.error(f"Ошибка отправки сообщения пользователю {user_id}: {e}")
+        await message.answer("❌ Не удалось отправить сообщение пользователю.", parse_mode="HTML")
+
+    await cb_chat_open(message, state)
+
+
+@dp.callback_query(F.data.startswith("chat_close_"))
+async def cb_chat_close(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    user_id = int(callback.data.split("_")[2])
+    await run_db(close_chat, user_id, callback.from_user.id)
+    await run_db(add_admin_log, callback.from_user.id, "close_chat", f"Закрыл чат с пользователем {user_id}")
+
+    await callback.answer("✅ Чат закрыт!", show_alert=True)
+    await cb_admin_chats(callback)
+
+
 # ===================== АДМИН: УПРАВЛЕНИЕ АКЦИЯМИ =====================
 @dp.callback_query(F.data == "admin_promotions")
 async def cb_admin_promotions(callback: CallbackQuery):
@@ -1909,7 +2587,6 @@ async def cb_promotion_delete(callback: CallbackQuery):
 
 
 # ===================== ГЛАВНЫЙ ОБРАБОТЧИК ДЛЯ ВСЕХ ЦИФРОВЫХ СООБЩЕНИЙ =====================
-# ВАЖНО: этот обработчик НЕ ДОЛЖЕН перехватывать FSM-состояния!
 @dp.message(Command("promo"))
 async def cmd_promo(message: Message):
     """Команда /promo ID — управление акцией"""
@@ -1961,7 +2638,6 @@ async def cb_set_price_process(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    # ПРОСТО ПЫТАЕМСЯ ПРЕОБРАЗОВАТЬ В ЧИСЛО
     try:
         new_price = int(message.text.strip())
     except ValueError:
@@ -1988,40 +2664,6 @@ async def cb_set_price_process(message: Message, state: FSMContext):
     await state.clear()
     await send_order_detail_message(message, order_id)
 
-
-@dp.message(AdminSetPriceState.waiting_for_price)
-async def cb_set_price_process(message: Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        await message.answer("⛔ Нет доступа.", parse_mode="HTML")
-        await state.clear()
-        return
-
-    # ПРОСТО ПЫТАЕМСЯ ПРЕОБРАЗОВАТЬ В ЧИСЛО
-    try:
-        new_price = int(message.text.strip())
-    except ValueError:
-        await message.answer("❌ Введите число. Например: 5000", parse_mode="HTML")
-        return
-
-    if new_price <= 0:
-        await message.answer("❌ Цена должна быть больше 0.", parse_mode="HTML")
-        return
-
-    data = await state.get_data()
-    order_id = data.get("order_id")
-    order = await run_db(get_order, order_id)
-    order_code = order[9] if order else f"#{order_id}"
-
-    await run_db(update_order_price, order_id, new_price, "")
-    await run_db(add_admin_log, message.from_user.id, "set_price",
-                 f"Назначил цену {new_price} руб. для заказа {order_code}")
-
-    await message.answer(
-        f"✅ Цена для заказа <b>{escape_html(order_code)}</b> обновлена на <b>{new_price} руб.</b>",
-        parse_mode="HTML"
-    )
-    await state.clear()
-    await send_order_detail_message(message, order_id)
 
 @dp.callback_query(F.data.startswith("promotion_do_activate_"))
 async def cb_promotion_do_activate(callback: CallbackQuery):
@@ -2637,6 +3279,7 @@ async def cb_order_detail(callback: CallbackQuery):
     urgent = "🔥 Срочный заказ!\n" if is_urgent else ""
     created = datetime.fromisoformat(created_at).strftime("%d.%m.%Y %H:%M")
     paid = datetime.fromisoformat(paid_at).strftime("%d.%m.%Y %H:%M") if paid_at else "Не оплачен"
+    is_premier = "PREMIER" in service or "Тотальная защита" in service
 
     text = f"""
 <b>📦 Информация о заказе {escape_html(display_code)}</b>
@@ -2658,7 +3301,7 @@ async def cb_order_detail(callback: CallbackQuery):
     if admin_note:
         text += f"📌 Заметка: {escape_html(admin_note)}\n"
 
-    await update_message(callback, text, order_detail_keyboard(order_id, status, is_urgent), "HTML")
+    await update_message(callback, text, order_detail_keyboard(order_id, status, is_urgent, is_premier), "HTML")
     await callback.answer()
 
 
@@ -2956,6 +3599,7 @@ async def send_order_detail_message(message: Message, order_id: int):
     urgent = "🔥 Срочный заказ!\n" if is_urgent else ""
     created = datetime.fromisoformat(created_at).strftime("%d.%m.%Y %H:%M")
     paid = datetime.fromisoformat(paid_at).strftime("%d.%m.%Y %H:%M") if paid_at else "Не оплачен"
+    is_premier = "PREMIER" in service or "Тотальная защита" in service
 
     text = f"""
 <b>📦 Информация о заказе {escape_html(display_code)}</b>
@@ -2977,7 +3621,7 @@ async def send_order_detail_message(message: Message, order_id: int):
     if admin_note:
         text += f"📌 Заметка: {escape_html(admin_note)}\n"
 
-    await message.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent),
+    await message.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent, is_premier),
                          parse_mode="HTML")
 
 
@@ -3131,6 +3775,7 @@ async def show_order_detail(target, order_id: int, is_callback: bool = False):
     urgent = "🔥 Срочный заказ!\n" if is_urgent else ""
     created = datetime.fromisoformat(created_at).strftime("%d.%m.%Y %H:%M")
     paid = datetime.fromisoformat(paid_at).strftime("%d.%m.%Y %H:%M") if paid_at else "Не оплачен"
+    is_premier = "PREMIER" in service or "Тотальная защита" in service
 
     text = f"""
 <b>📦 Информация о заказе {escape_html(display_code)}</b>
@@ -3154,13 +3799,13 @@ async def show_order_detail(target, order_id: int, is_callback: bool = False):
 
     if is_callback:
         try:
-            await target.edit_text(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent),
+            await target.edit_text(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent, is_premier),
                                    parse_mode="HTML")
         except Exception:
-            await target.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent),
+            await target.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent, is_premier),
                                 parse_mode="HTML")
     else:
-        await target.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent),
+        await target.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent, is_premier),
                             parse_mode="HTML")
 
 
@@ -3221,6 +3866,60 @@ async def cb_attach_file_process(message: Message, state: FSMContext):
                                    parse_mode="HTML")
         except Exception as e:
             logging.warning(f"Не удалось уведомить пользователя {order[1]}: {e}")
+
+
+# ===================== ВЫДАЧА СЕРТИФИКАТА (PREMIER) =====================
+@dp.callback_query(F.data.startswith("premier_certificate_"))
+async def cb_premier_certificate(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    order_id = int(callback.data.split("_")[2])
+    order = await run_db(get_order, order_id)
+    if not order:
+        await callback.answer("❌ Заказ не найден", show_alert=True)
+        return
+
+    user_id = order[1]
+    user = await run_db(get_user, user_id)
+    if not user:
+        await callback.answer("❌ Пользователь не найден", show_alert=True)
+        return
+
+    user_name = f"{user[2]} {user[3] or ''}".strip() or user[1] or f"ID:{user_id}"
+    order_code = order[9] or f"#{order_id}"
+    service_name = order[2]
+    completion_date = datetime.now().strftime("%d.%m.%Y")
+
+    await callback.answer("⏳ Генерируем сертификат...")
+
+    pdf_file = await run_db(generate_certificate_pdf, user_name, service_name, completion_date, order_code)
+
+    if pdf_file:
+        await callback.message.answer_document(
+            document=BufferedInputFile(pdf_file.getvalue(), filename=f"certificate_{order_code}.pdf"),
+            caption=f"🏆 <b>Сертификат для заказа {order_code}</b>\n\n👤 {user_name}\n📋 {service_name}\n📅 {completion_date}",
+            parse_mode="HTML"
+        )
+
+        try:
+            await bot.send_document(
+                user_id,
+                BufferedInputFile(pdf_file.getvalue(), filename=f"certificate_{order_code}.pdf"),
+                caption=f"🏆 <b>Поздравляем с успешным завершением!</b>\n\nВаш сертификат о прохождении программы:\n📋 {service_name}\n📅 {completion_date}\n\nСпасибо, что выбрали Sopranidi Corp.! 🎉",
+                parse_mode="HTML"
+            )
+            await callback.answer("✅ Сертификат отправлен пользователю!", show_alert=True)
+        except Exception as e:
+            logging.warning(f"Не удалось отправить сертификат пользователю: {e}")
+            await callback.answer("⚠️ Сертификат сгенерирован, но не отправлен пользователю", show_alert=True)
+    else:
+        await callback.answer("❌ Ошибка генерации сертификата. Проверьте шаблон и установку weasyprint.",
+                              show_alert=True)
+
+    await run_db(add_admin_log, callback.from_user.id, "certificate_generated",
+                 f"Сгенерировал сертификат для заказа {order_code}")
 
 
 # ===================== ОТЗЫВЫ (ПОЛЬЗОВАТЕЛЬ) =====================
