@@ -2158,6 +2158,95 @@ async def cb_admin_add(callback: CallbackQuery):
     await callback.message.edit_text(text, reply_markup=back_to_admin_keyboard(), parse_mode="HTML")
     await callback.answer()
 
+@dp.message(Command("addadmin"))
+async def cmd_addadmin(message: Message):
+    """Команда /addadmin ID_или_username — добавляет администратора"""
+    if not is_super_admin(message.from_user.id):
+        await message.answer("⛔ Только супер-админ может добавлять.", parse_mode="HTML")
+        return
+
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer(
+            "👑 <b>Добавление администратора</b>\n\n"
+            "Использование:\n"
+            "<code>/addadmin 123456789</code> — по ID\n"
+            "<code>/addadmin @username</code> — по username\n"
+            "<code>/addadmin t.me/username</code> — по ссылке\n\n"
+            "ℹ️ Пользователь будет автоматически добавлен в базу, если его там нет.",
+            parse_mode="HTML"
+        )
+        return
+
+    user_input = parts[1].strip()
+    user_id = None
+    username = None
+    first_name = None
+
+    # Пробуем определить ID
+    if user_input.isdigit():
+        user_id = int(user_input)
+    elif user_input.startswith("@"):
+        username = user_input.replace("@", "")
+        conn = sqlite3.connect(DB_NAME)
+        cur = conn.cursor()
+        cur.execute("SELECT user_id, username, first_name FROM users WHERE username = ?", (username,))
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            user_id, username, first_name = row
+    elif "t.me/" in user_input:
+        username = user_input.split("t.me/")[-1].replace("/", "").strip()
+        username = username.replace("@", "")
+        conn = sqlite3.connect(DB_NAME)
+        cur = conn.cursor()
+        cur.execute("SELECT user_id, username, first_name FROM users WHERE username = ?", (username,))
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            user_id, username, first_name = row
+
+    if not user_id:
+        await message.answer(
+            "❌ Не удалось найти пользователя.\n\n"
+            "Убедитесь, что:\n"
+            "1. Вы правильно ввели ID или username\n"
+            "2. Если пользователь не писал /start, я добавлю его автоматически, но нужен ID\n\n"
+            "Попробуйте: /addadmin 8547274268",
+            parse_mode="HTML"
+        )
+        return
+
+    # ==== ДОБАВЛЯЕМ ПОЛЬЗОВАТЕЛЯ В БД, ЕСЛИ ЕГО НЕТ ====
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT OR IGNORE INTO users (user_id, username, first_name, reg_date) VALUES (?, ?, ?, ?)",
+        (user_id, username or None, first_name or f"User_{user_id}", datetime.now().isoformat())
+    )
+    conn.commit()
+    conn.close()
+
+    # Проверяем, админ ли уже
+    if await run_db(is_admin_db, user_id):
+        await message.answer("❌ Этот пользователь уже является админом.", parse_mode="HTML")
+        return
+
+    # Получаем актуальные данные пользователя
+    user = await run_db(get_user_by_id, user_id)
+    username = user[1] if user else username
+    first_name = user[2] if user else first_name
+
+    # Добавляем как админа
+    await run_db(add_admin, user_id, username, first_name, message.from_user.id)
+    await run_db(add_admin_log, message.from_user.id, "add_admin", f"Добавил админа {user_id}")
+
+    await message.answer(
+        f"✅ Администратор <b>{username or first_name or str(user_id)}</b> успешно добавлен!\n\n"
+        f"📌 Теперь он может использовать /admin",
+        reply_markup=admin_menu_keyboard(),
+        parse_mode="HTML"
+    )
 
 @dp.message(Command("admins"))
 async def cmd_admins(message: Message):
