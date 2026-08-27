@@ -1689,6 +1689,81 @@ async def cmd_admin(message: Message):
 """
     await send_safe_message(message, text, admin_menu_keyboard(), "HTML")
 
+@dp.message(Command("addadmin"))
+async def cmd_addadmin(message: Message):
+    """Команда /addadmin ID_или_username — добавляет администратора"""
+    if not is_super_admin(message.from_user.id):
+        await message.answer("⛔ Только супер-админ может добавлять.", parse_mode="HTML")
+        return
+
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer(
+            "👑 <b>Добавление администратора</b>\n\n"
+            "Использование:\n"
+            "<code>/addadmin 123456789</code> — по ID\n"
+            "<code>/addadmin @username</code> — по username\n"
+            "<code>/addadmin t.me/username</code> — по ссылке\n\n"
+            "ℹ️ Пользователь должен хотя бы раз написать боту команду /start",
+            parse_mode="HTML"
+        )
+        return
+
+    user_input = parts[1].strip()
+    user_id = None
+
+    # Пробуем определить ID
+    if user_input.isdigit():
+        user_id = int(user_input)
+    elif user_input.startswith("@"):
+        username = user_input.replace("@", "")
+        conn = sqlite3.connect(DB_NAME)
+        cur = conn.cursor()
+        cur.execute("SELECT user_id FROM users WHERE username = ?", (username,))
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            user_id = row[0]
+    elif "t.me/" in user_input:
+        username = user_input.split("t.me/")[-1].replace("/", "").strip()
+        username = username.replace("@", "")
+        conn = sqlite3.connect(DB_NAME)
+        cur = conn.cursor()
+        cur.execute("SELECT user_id FROM users WHERE username = ?", (username,))
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            user_id = row[0]
+
+    if not user_id:
+        await message.answer(
+            "❌ Не удалось найти пользователя.\n\n"
+            "Убедитесь, что:\n"
+            "1. Пользователь написал боту /start\n"
+            "2. Вы правильно ввели ID или username\n\n"
+            "Попробуйте: /addadmin @username",
+            parse_mode="HTML"
+        )
+        return
+
+    if await run_db(is_admin_db, user_id):
+        await message.answer("❌ Этот пользователь уже является админом.", parse_mode="HTML")
+        return
+
+    user = await run_db(get_user_by_id, user_id)
+    username = user[1] if user else None
+    first_name = user[2] if user else None
+
+    await run_db(add_admin, user_id, username, first_name, message.from_user.id)
+    await run_db(add_admin_log, message.from_user.id, "add_admin", f"Добавил админа {user_id}")
+
+    await message.answer(
+        f"✅ Администратор <b>{username or first_name or str(user_id)}</b> успешно добавлен!\n\n"
+        f"📌 Теперь он может использовать /admin",
+        reply_markup=admin_menu_keyboard(),
+        parse_mode="HTML"
+    )
+
 
 @dp.message(Command("stats"))
 async def cmd_stats(message: Message):
@@ -2061,20 +2136,49 @@ async def cb_admin_admins(callback: CallbackQuery):
     await callback.answer()
 
 @dp.callback_query(F.data == "admin_add")
-async def cb_admin_add(callback: CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("⛔ Нет доступа", show_alert=True)
+async def cb_admin_add(callback: CallbackQuery):
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer("⛔ Только супер-админ может добавлять", show_alert=True)
         return
 
-    await callback.message.edit_text(
-        "👑 <b>Добавление администратора</b>\n\n"
-        "Введите ID пользователя (например, 123456789):\n"
-        "Или отправьте ссылку на профиль: t.me/username",
-        reply_markup=back_to_admin_keyboard(),
-        parse_mode="HTML"
-    )
-    await state.set_state("waiting_for_admin_id")
+    text = """
+👑 <b>Добавление администратора</b>
 
+Используйте команду в чате:
+
+<code>/addadmin ID_пользователя</code>
+
+Примеры:
+<code>/addadmin 123456789</code>
+<code>/addadmin @username</code>
+<code>/addadmin t.me/username</code>
+
+ℹ️ Пользователь должен хотя бы раз написать боту /start
+"""
+    await callback.message.edit_text(text, reply_markup=back_to_admin_keyboard(), parse_mode="HTML")
+    await callback.answer()
+
+
+@dp.message(Command("admins"))
+async def cmd_admins(message: Message):
+    """Показывает список администраторов"""
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Нет доступа.")
+        return
+
+    admins = await run_db(get_all_admins)
+    if not admins:
+        await message.answer("👑 Список администраторов пуст.")
+        return
+
+    text = "👑 <b>Список администраторов:</b>\n\n"
+    for admin in admins:
+        user_id, username, first_name, role, added_at = admin
+        role_icon = "⭐" if role == "super_admin" else "👤"
+        name = username or first_name or str(user_id)
+        text += f"{role_icon} {name} (ID: {user_id}) — {role}\n"
+
+    await message.answer(text, parse_mode="HTML")
 
 @dp.message(StateFilter("waiting_for_admin_id"))
 async def process_admin_add(message: Message, state: FSMContext):
