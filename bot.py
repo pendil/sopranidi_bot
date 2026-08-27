@@ -1814,13 +1814,12 @@ async def cmd_broadcast(message: Message, state: FSMContext):
 
 # ===================== ОБРАБОТЧИК СООБЩЕНИЙ ОТ КЛИЕНТОВ =====================
 @dp.message()
-async def handle_client_message(message: Message):
+async def handle_client_message(message: Message, state: FSMContext):
     """Обработчик сообщений от клиентов"""
     user_id = message.from_user.id
 
-    # ===== ПРОВЕРЯЕМ, НЕ В FSM ЛИ МЫ =====
-    state = await dp.fsm.get_state(message)
-    if state is not None:
+    current_state = await state.get_state()
+    if current_state is not None:
         return
 
     if await run_db(is_admin_db, user_id):
@@ -1828,6 +1827,8 @@ async def handle_client_message(message: Message):
 
     if not message.text:
         return
+
+    # ... остальной код без изменений
 
     await run_db(send_message, user_id, None, message.text, 0)
     await run_db(add_user_log, user_id, "chat_message", f"Отправил сообщение: {message.text[:50]}...")
