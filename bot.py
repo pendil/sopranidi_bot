@@ -19,21 +19,12 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# ===================== ДЛЯ ГЕНЕРАЦИИ PDF СЕРТИФИКАТОВ =====================
-try:
-    from weasyprint import HTML
-    from weasyprint.text.fonts import FontConfiguration
-
-    PDF_AVAILABLE = True
-    print("✅ weasyprint загружен")
-except ImportError:
-    PDF_AVAILABLE = False
-    print("⚠️ weasyprint не установлен. Генерация PDF будет недоступна.")
+# ===================== ПОЛИТИКА КОНФИДЕНЦИАЛЬНОСТИ =====================
+POLICY_URL = "https://telegra.ph/POLITIKA-KONFIDENCIALNOSTI-08-27-64"
 
 # ===================== ЗАГРУЗКА .ENV =====================
 try:
     from dotenv import load_dotenv
-
     load_dotenv()
 except ImportError:
     pass
@@ -42,7 +33,6 @@ except ImportError:
 try:
     import openpyxl
     from openpyxl.styles import Font, PatternFill, Alignment
-
     EXCEL_AVAILABLE = True
 except ImportError:
     EXCEL_AVAILABLE = False
@@ -59,7 +49,6 @@ GREEK_LETTERS = [
 BASE_DIR = Path(__file__).resolve().parent
 LOGO_PATH = BASE_DIR / "logo.jpg"
 EXAMPLES_DIR = BASE_DIR / "examples"
-TEMPLATE_PATH = BASE_DIR / "certificate_template.html"
 
 # ===================== НАСТРОЙКА БАЗЫ ДАННЫХ =====================
 DATA_DIR = "/persistent" if os.path.exists("/persistent") else str(BASE_DIR / "data")
@@ -129,38 +118,6 @@ def format_price_with_discount(original_price: int, discount: int) -> str:
         return f"<b>{original_price} ₽</b>"
     new_price = max(1, round(original_price * (1 - discount / 100)))
     return f"<s>{original_price} ₽</s> → <b>{new_price} ₽</b> 🎉"
-
-
-# ===================== ГЕНЕРАЦИЯ PDF СЕРТИФИКАТА =====================
-def generate_certificate_pdf(user_name: str, service_name: str, completion_date: str, order_code: str) -> BytesIO:
-    """Генерирует PDF-сертификат из HTML-шаблона"""
-    if not PDF_AVAILABLE:
-        return None
-
-    if not TEMPLATE_PATH.exists():
-        logging.error(f"❌ Шаблон сертификата не найден: {TEMPLATE_PATH}")
-        return None
-
-    try:
-        with open(TEMPLATE_PATH, 'r', encoding='utf-8') as f:
-            html_content = f.read()
-
-        html_content = html_content.replace('{{ user_name }}', user_name)
-        html_content = html_content.replace('{{ service_name }}', service_name)
-        html_content = html_content.replace('{{ completion_date }}', completion_date)
-        html_content = html_content.replace('{{ order_code }}', order_code)
-
-        font_config = FontConfiguration()
-        pdf_bytes = HTML(string=html_content).write_pdf(font_config=font_config)
-
-        output = BytesIO()
-        output.write(pdf_bytes)
-        output.seek(0)
-        return output
-
-    except Exception as e:
-        logging.error(f"❌ Ошибка генерации PDF: {e}")
-        return None
 
 
 # ===================== БАЗА ДАННЫХ =====================
@@ -245,9 +202,7 @@ def init_db():
             ("Защитное слово", "Составление защитного слова для проекта", 99),
             ("Реферат", "Написание качественного реферата по любой теме", 1200),
             ("Редактирование работы", "Правка и доработка готовой работы", 800),
-            ("Тотальная защита (PREMIER)",
-             "Полное сопровождение проекта: консультация, создание работы, объяснение материала, тренаж защиты и финальные правки.",
-             3500),
+            ("Тотальная защита (PREMIER)", "Полное сопровождение проекта: консультация, создание работы, объяснение материала, тренаж защиты и финальные правки.", 3500),
         ]
         for name, desc, price in default_services:
             cur.execute(
@@ -413,8 +368,7 @@ def get_all_admins():
 def get_admin(user_id: int):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
-    cur.execute("SELECT user_id, username, first_name, role, added_at FROM admins WHERE user_id = ? AND is_active = 1",
-                (user_id,))
+    cur.execute("SELECT user_id, username, first_name, role, added_at FROM admins WHERE user_id = ? AND is_active = 1", (user_id,))
     row = cur.fetchone()
     conn.close()
     return row
@@ -1411,8 +1365,7 @@ def orders_keyboard(orders: list, page: int = 0) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def order_detail_keyboard(order_id: int, status: str, is_urgent: int = 0,
-                          is_premier: bool = False) -> InlineKeyboardMarkup:
+def order_detail_keyboard(order_id: int, status: str, is_urgent: int = 0) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     if status == "pending":
         builder.button(text="✅ Подтвердить оплату", callback_data=f"confirm_payment_{order_id}")
@@ -1427,8 +1380,6 @@ def order_detail_keyboard(order_id: int, status: str, is_urgent: int = 0,
     elif status == "paid":
         builder.button(text="📎 Прикрепить файл", callback_data=f"attach_file_{order_id}")
         builder.button(text="❌ Удалить заказ", callback_data=f"delete_order_{order_id}")
-        if is_premier:
-            builder.button(text="🏆 Выдать сертификат", callback_data=f"premier_certificate_{order_id}")
     builder.button(text="🔙 Назад к заказам", callback_data="admin_orders")
     builder.adjust(1)
     return builder.as_markup()
@@ -1616,110 +1567,56 @@ async def cmd_help(message: Message):
 
 @dp.message(Command("policy"))
 async def cmd_policy(message: Message):
-    """Показывает политику конфиденциальности"""
-    text = """
+    """Показывает краткую информацию о политике и командах для управления данными"""
+    text = f"""
 📄 <b>ПОЛИТИКА КОНФИДЕНЦИАЛЬНОСТИ</b>
 <b>Sopranidi Corporation</b>
 
-1. <b>Общие положения</b>
-Настоящая Политика регулирует порядок сбора, хранения и обработки персональных данных пользователей Telegram-бота Sopranidi Corp.
+🔒 Мы уважаем вашу приватность и защищаем ваши данные.
 
-2. <b>Какие данные мы собираем</b>
-• Telegram ID, username, имя, фамилия
+<b>📌 Что мы собираем:</b>
+• Telegram ID, имя, username
 • Данные о заказах и истории обращений
 • Технические данные для улучшения сервиса
 
-3. <b>Как мы используем данные</b>
-• Для обработки заказов и технической поддержки
+<b>📌 Как мы используем:</b>
+• Для обработки заказов и поддержки
 • Для улучшения качества обслуживания
 • Для информирования (только с вашего согласия)
 
-4. <b>Хранение данных</b>
-Все данные хранятся в зашифрованной базе данных на защищённых серверах. Срок хранения — 3 года с момента последнего взаимодействия.
+<b>📌 Ваши права и команды:</b>
 
-5. <b>Ваши права</b>
-Вы имеете право:
-• Знать, какие данные мы храним (/mydata)
-• Исправить неточные данные (/profile)
-• Удалить свои данные (/deletedata)
-• Отозвать согласие (/revoke)
+🔹 <b>Знать, какие данные мы храним</b>
+Напишите команду <code>/mydata</code> в боте или запросите у администратора
 
-6. <b>Контакты</b>
-📌 Диспетчер: @sopranidis_support
+🔹 <b>Исправить неточные данные</b>
+Используйте команду <code>/profile</code> для изменения
+
+🔹 <b>Удалить свои данные</b>
+Напишите команду <code>/deletedata</code> (данные будут удалены в течение 72 часов)
+
+🔹 <b>Отозвать согласие</b>
+Используйте команду <code>/revoke</code> или напишите администратору
+
+🔹 <b>Получить копию данных</b>
+Запросите у администратора по команде <code>/exportdata</code>
+
+📌 <b>Контакты:</b>
+👤 Диспетчер: @sopranidis_support
 🏛️ CEO: @sopranidi
-📧 Email: support@sopranidi.com
+📧 Email: kpanaet@gmail.com
+
+📄 <b>Полная версия Политики:</b>
+<a href="{POLICY_URL}">{POLICY_URL}</a>
 
 <i>Дата обновления: 27.08.2026</i>
 """
     keyboard = InlineKeyboardBuilder()
-    keyboard.button(text="📄 Полная Политика", callback_data="show_full_policy")
+    keyboard.button(text="📄 Полная Политика", url=POLICY_URL)
     keyboard.button(text="🔙 Назад", callback_data="main_menu")
     keyboard.adjust(1)
 
     await message.answer(text, reply_markup=keyboard.as_markup(), parse_mode="HTML")
-
-
-@dp.callback_query(F.data == "show_full_policy")
-async def cb_full_policy(callback: CallbackQuery):
-    """Показывает полную политику конфиденциальности"""
-    text = """
-📄 <b>ПОЛИТИКА КОНФИДЕНЦИАЛЬНОСТИ (ПОЛНАЯ ВЕРСИЯ)</b>
-<b>Sopranidi Corporation</b>
-
-1. <b>ОБЩИЕ ПОЛОЖЕНИЯ</b>
-1.1. Настоящая Политика конфиденциальности регулирует порядок сбора, хранения, обработки и защиты персональных данных пользователей Telegram-бота Sopranidi Corp.
-1.2. Использование Бота означает безоговорочное согласие Пользователя с условиями настоящей Политики.
-
-2. <b>КАКИЕ ДАННЫЕ МЫ СОБИРАЕМ</b>
-• Идентификационные данные: Telegram ID, username, имя, фамилия
-• Контактные данные: Telegram ID (используется как основной канал связи)
-• Данные о заказах: выбранные услуги, дата заказа, сумма, статус
-• История взаимодействий: сообщения в чате, дата и время обращений
-• Технические данные: дата и время использования Бота, действия в интерфейсе
-• Дополнительные данные: дата рождения (по желанию), использованные промокоды
-
-Мы НЕ собираем и НЕ храним: платёжные данные, паспортные данные, биометрические данные, содержимое выполненных работ.
-
-3. <b>КАК МЫ ИСПОЛЬЗУЕМ ВАШИ ДАННЫЕ</b>
-• Обработка заказов — создание, выполнение и доставка заказов
-• Техническая поддержка — ответы на вопросы, помощь в использовании Бота
-• Улучшение сервиса — анализ использования Бота для повышения качества
-• Информирование — уведомления о статусе заказа, акциях и новостях (только с согласия)
-• Безопасность — защита от мошенничества и несанкционированного доступа
-
-4. <b>ХРАНЕНИЕ ДАННЫХ</b>
-• Все данные хранятся в зашифрованной базе данных на защищённых серверах
-• Данные хранятся в течение 3 лет с момента последнего взаимодействия
-• Используются меры защиты: шифрование (AES-256), ограниченный доступ, резервное копирование
-
-5. <b>ПРАВА ПОЛЬЗОВАТЕЛЯ</b>
-В соответствии с Федеральным законом № 152-ФЗ «О персональных данных»:
-• /mydata — узнать, какие данные мы храним
-• /profile — исправить неточные данные
-• /deletedata — удалить свои данные
-• /revoke — отозвать согласие
-• /exportdata — получить копию данных
-
-6. <b>ПЕРЕДАЧА ДАННЫХ ТРЕТЬИМ ЛИЦАМ</b>
-Мы НЕ продаём, не обмениваем и не передаём ваши персональные данные третьим лицам. Исключения: по требованию уполномоченных государственных органов, для защиты прав Компании, при реорганизации или продаже бизнеса.
-
-7. <b>ЗАЩИТА ДАННЫХ НЕСОВЕРШЕННОЛЕТНИХ</b>
-Бот предназначен для пользователей старше 14 лет. Мы не собираем осознанно данные о пользователях младше 14 лет.
-
-8. <b>КОНТАКТЫ</b>
-📌 Диспетчер: @sopranidis_support
-🏛️ CEO: @sopranidi
-📧 Email: support@sopranidi.com
-📢 Канал: https://t.me/sopranidi_corporation
-
-<i>Дата обновления: 27.08.2026</i>
-"""
-    keyboard = InlineKeyboardBuilder()
-    keyboard.button(text="🔙 Назад", callback_data="main_menu")
-    keyboard.adjust(1)
-
-    await callback.message.edit_text(text, reply_markup=keyboard.as_markup(), parse_mode="HTML")
-    await callback.answer()
 
 
 @dp.message(Command("set_birthday"))
@@ -1976,11 +1873,14 @@ Username: {escape_html(username_str)}
         text += "• Нет использованных промокодов"
     if discount > 0:
         text += f"\n\n🎉 У вас активна скидка <b>{discount}%</b> (промокод {escape_html(discount_code)}) — она применится к следующему заказу!"
+
     keyboard = InlineKeyboardBuilder()
     keyboard.button(text="🎂 Установить день рождения", callback_data="set_birthday")
     keyboard.button(text="🎟️ Применить промокод", callback_data="apply_promocode")
+    keyboard.button(text="📄 Политика конфиденциальности", url=POLICY_URL)
     keyboard.button(text="🔙 Назад", callback_data="main_menu")
     keyboard.adjust(1)
+
     await update_message(callback, text, keyboard.as_markup(), "HTML")
     await callback.answer()
 
@@ -2071,6 +1971,7 @@ Sopranidi Corp. — экосистема профессиональных реш
     keyboard.button(text="👤 Связаться с CEO", url=f"https://t.me/{ceo_username}")
     keyboard.button(text="📢 Перейти в канал", url=CHANNEL_LINK)
     keyboard.button(text="🤖 Перейти в бота", url=BOT_LINK)
+    keyboard.button(text="📄 Политика конфиденциальности", url=POLICY_URL)
     keyboard.button(text="🔙 Назад", callback_data="main_menu")
     keyboard.adjust(1)
     await update_message(callback, text, keyboard.as_markup(), "HTML")
@@ -2333,8 +2234,7 @@ async def chat_send_message(message: Message, state: FSMContext):
         return
 
     await run_db(send_message, user_id, message.from_user.id, message.text, 1)
-    await run_db(add_admin_log, message.from_user.id, "chat_message",
-                 f"Отправил сообщение пользователю {user_id}: {message.text[:50]}...")
+    await run_db(add_admin_log, message.from_user.id, "chat_message", f"Отправил сообщение пользователю {user_id}: {message.text[:50]}...")
 
     try:
         await bot.send_message(
@@ -3279,7 +3179,6 @@ async def cb_order_detail(callback: CallbackQuery):
     urgent = "🔥 Срочный заказ!\n" if is_urgent else ""
     created = datetime.fromisoformat(created_at).strftime("%d.%m.%Y %H:%M")
     paid = datetime.fromisoformat(paid_at).strftime("%d.%m.%Y %H:%M") if paid_at else "Не оплачен"
-    is_premier = "PREMIER" in service or "Тотальная защита" in service
 
     text = f"""
 <b>📦 Информация о заказе {escape_html(display_code)}</b>
@@ -3301,7 +3200,7 @@ async def cb_order_detail(callback: CallbackQuery):
     if admin_note:
         text += f"📌 Заметка: {escape_html(admin_note)}\n"
 
-    await update_message(callback, text, order_detail_keyboard(order_id, status, is_urgent, is_premier), "HTML")
+    await update_message(callback, text, order_detail_keyboard(order_id, status, is_urgent), "HTML")
     await callback.answer()
 
 
@@ -3599,7 +3498,6 @@ async def send_order_detail_message(message: Message, order_id: int):
     urgent = "🔥 Срочный заказ!\n" if is_urgent else ""
     created = datetime.fromisoformat(created_at).strftime("%d.%m.%Y %H:%M")
     paid = datetime.fromisoformat(paid_at).strftime("%d.%m.%Y %H:%M") if paid_at else "Не оплачен"
-    is_premier = "PREMIER" in service or "Тотальная защита" in service
 
     text = f"""
 <b>📦 Информация о заказе {escape_html(display_code)}</b>
@@ -3621,7 +3519,7 @@ async def send_order_detail_message(message: Message, order_id: int):
     if admin_note:
         text += f"📌 Заметка: {escape_html(admin_note)}\n"
 
-    await message.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent, is_premier),
+    await message.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent),
                          parse_mode="HTML")
 
 
@@ -3775,7 +3673,6 @@ async def show_order_detail(target, order_id: int, is_callback: bool = False):
     urgent = "🔥 Срочный заказ!\n" if is_urgent else ""
     created = datetime.fromisoformat(created_at).strftime("%d.%m.%Y %H:%M")
     paid = datetime.fromisoformat(paid_at).strftime("%d.%m.%Y %H:%M") if paid_at else "Не оплачен"
-    is_premier = "PREMIER" in service or "Тотальная защита" in service
 
     text = f"""
 <b>📦 Информация о заказе {escape_html(display_code)}</b>
@@ -3799,13 +3696,13 @@ async def show_order_detail(target, order_id: int, is_callback: bool = False):
 
     if is_callback:
         try:
-            await target.edit_text(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent, is_premier),
+            await target.edit_text(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent),
                                    parse_mode="HTML")
         except Exception:
-            await target.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent, is_premier),
+            await target.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent),
                                 parse_mode="HTML")
     else:
-        await target.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent, is_premier),
+        await target.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent),
                             parse_mode="HTML")
 
 
@@ -3866,60 +3763,6 @@ async def cb_attach_file_process(message: Message, state: FSMContext):
                                    parse_mode="HTML")
         except Exception as e:
             logging.warning(f"Не удалось уведомить пользователя {order[1]}: {e}")
-
-
-# ===================== ВЫДАЧА СЕРТИФИКАТА (PREMIER) =====================
-@dp.callback_query(F.data.startswith("premier_certificate_"))
-async def cb_premier_certificate(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("⛔ Нет доступа", show_alert=True)
-        return
-
-    order_id = int(callback.data.split("_")[2])
-    order = await run_db(get_order, order_id)
-    if not order:
-        await callback.answer("❌ Заказ не найден", show_alert=True)
-        return
-
-    user_id = order[1]
-    user = await run_db(get_user, user_id)
-    if not user:
-        await callback.answer("❌ Пользователь не найден", show_alert=True)
-        return
-
-    user_name = f"{user[2]} {user[3] or ''}".strip() or user[1] or f"ID:{user_id}"
-    order_code = order[9] or f"#{order_id}"
-    service_name = order[2]
-    completion_date = datetime.now().strftime("%d.%m.%Y")
-
-    await callback.answer("⏳ Генерируем сертификат...")
-
-    pdf_file = await run_db(generate_certificate_pdf, user_name, service_name, completion_date, order_code)
-
-    if pdf_file:
-        await callback.message.answer_document(
-            document=BufferedInputFile(pdf_file.getvalue(), filename=f"certificate_{order_code}.pdf"),
-            caption=f"🏆 <b>Сертификат для заказа {order_code}</b>\n\n👤 {user_name}\n📋 {service_name}\n📅 {completion_date}",
-            parse_mode="HTML"
-        )
-
-        try:
-            await bot.send_document(
-                user_id,
-                BufferedInputFile(pdf_file.getvalue(), filename=f"certificate_{order_code}.pdf"),
-                caption=f"🏆 <b>Поздравляем с успешным завершением!</b>\n\nВаш сертификат о прохождении программы:\n📋 {service_name}\n📅 {completion_date}\n\nСпасибо, что выбрали Sopranidi Corp.! 🎉",
-                parse_mode="HTML"
-            )
-            await callback.answer("✅ Сертификат отправлен пользователю!", show_alert=True)
-        except Exception as e:
-            logging.warning(f"Не удалось отправить сертификат пользователю: {e}")
-            await callback.answer("⚠️ Сертификат сгенерирован, но не отправлен пользователю", show_alert=True)
-    else:
-        await callback.answer("❌ Ошибка генерации сертификата. Проверьте шаблон и установку weasyprint.",
-                              show_alert=True)
-
-    await run_db(add_admin_log, callback.from_user.id, "certificate_generated",
-                 f"Сгенерировал сертификат для заказа {order_code}")
 
 
 # ===================== ОТЗЫВЫ (ПОЛЬЗОВАТЕЛЬ) =====================
