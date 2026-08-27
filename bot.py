@@ -1545,6 +1545,27 @@ async def cmd_start(message: Message):
     await send_safe_message(message, text, main_menu_keyboard(), "HTML")
 
 
+@dp.message(Command("admins"))
+async def cmd_admins(message: Message):
+    """Показывает список администраторов"""
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Нет доступа.")
+        return
+
+    admins = await run_db(get_all_admins)
+    if not admins:
+        await message.answer("👑 Список администраторов пуст.")
+        return
+
+    text = "👑 <b>Список администраторов:</b>\n\n"
+    for admin in admins:
+        user_id, username, first_name, role, added_at = admin
+        role_icon = "⭐" if role == "super_admin" else "👤"
+        name = username or first_name or str(user_id)
+        text += f"{role_icon} {name} (ID: {user_id}) — {role}\n"
+
+    await message.answer(text, parse_mode="HTML")
+
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
     text = """
@@ -1722,6 +1743,11 @@ async def cmd_broadcast(message: Message, state: FSMContext):
 async def handle_client_message(message: Message):
     """Обработчик сообщений от клиентов"""
     user_id = message.from_user.id
+
+    # ===== ПРОВЕРЯЕМ, НЕ В FSM ЛИ МЫ =====
+    state = await dp.fsm.get_state(message)
+    if state is not None:
+        return
 
     if await run_db(is_admin_db, user_id):
         return
@@ -2024,17 +2050,15 @@ async def cb_admin_admins(callback: CallbackQuery):
         text += "Нет администраторов.\n"
 
     keyboard = InlineKeyboardBuilder()
+    keyboard.button(text="➕ Добавить админа", callback_data="admin_add")
     if is_super_admin(callback.from_user.id):
-        keyboard.button(text="➕ Добавить админа", callback_data="admin_add")
         keyboard.button(text="🗑️ Удалить админа", callback_data="admin_remove")
-    else:
-        keyboard.button(text="➕ Добавить админа", callback_data="admin_add")
+    keyboard.button(text="🔄 Обновить список", callback_data="admin_admins")
     keyboard.button(text="🔙 Назад", callback_data="admin_menu")
     keyboard.adjust(1)
 
     await update_message(callback, text, keyboard.as_markup(), "HTML")
     await callback.answer()
-
 
 @dp.callback_query(F.data == "admin_add")
 async def cb_admin_add(callback: CallbackQuery, state: FSMContext):
@@ -2062,10 +2086,37 @@ async def process_admin_add(message: Message, state: FSMContext):
     text = message.text.strip()
     user_id = None
 
+    # Если просто число
     if text.isdigit():
         user_id = int(text)
+
+    # Если ссылка t.me/username
     elif "t.me/" in text:
+        # Извлекаем username из ссылки
         username = text.split("t.me/")[-1].replace("/", "").strip()
+        # Убираем @ если есть
+        username = username.replace("@", "")
+
+        conn = sqlite3.connect(DB_NAME)
+        cur = conn.cursor()
+        cur.execute("SELECT user_id FROM users WHERE username = ?", (username,))
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            user_id = row[0]
+        else:
+            # Пробуем найти по username в admins
+            conn = sqlite3.connect(DB_NAME)
+            cur = conn.cursor()
+            cur.execute("SELECT user_id FROM admins WHERE username = ? AND is_active = 1", (username,))
+            row = cur.fetchone()
+            conn.close()
+            if row:
+                user_id = row[0]
+
+    # Если просто username (без t.me/)
+    if not user_id and text.startswith("@"):
+        username = text.replace("@", "")
         conn = sqlite3.connect(DB_NAME)
         cur = conn.cursor()
         cur.execute("SELECT user_id FROM users WHERE username = ?", (username,))
@@ -2075,7 +2126,15 @@ async def process_admin_add(message: Message, state: FSMContext):
             user_id = row[0]
 
     if not user_id:
-        await message.answer("❌ Не удалось определить ID пользователя. Попробуйте ещё раз:", parse_mode="HTML")
+        await message.answer(
+            "❌ Не удалось определить ID пользователя.\n\n"
+            "Попробуйте:\n"
+            "1. Отправить ID (число)\n"
+            "2. Отправить ссылку t.me/username\n"
+            "3. Отправить @username\n\n"
+            "Или попросите пользователя написать боту команду /start, чтобы он появился в базе.",
+            parse_mode="HTML"
+        )
         return
 
     if await run_db(is_admin_db, user_id):
@@ -2083,6 +2142,7 @@ async def process_admin_add(message: Message, state: FSMContext):
         await state.clear()
         return
 
+    # Получаем данные пользователя
     user = await run_db(get_user_by_id, user_id)
     username = user[1] if user else None
     first_name = user[2] if user else None
@@ -2091,7 +2151,8 @@ async def process_admin_add(message: Message, state: FSMContext):
     await run_db(add_admin_log, message.from_user.id, "add_admin", f"Добавил админа {user_id}")
 
     await message.answer(
-        f"✅ Администратор <b>{username or first_name or str(user_id)}</b> успешно добавлен!",
+        f"✅ Администратор <b>{username or first_name or str(user_id)}</b> успешно добавлен!\n\n"
+        f"📌 Теперь он может использовать /admin",
         reply_markup=admin_menu_keyboard(),
         parse_mode="HTML"
     )
