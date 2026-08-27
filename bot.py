@@ -2351,6 +2351,88 @@ async def process_admin_add(message: Message, state: FSMContext):
     await state.clear()
 
 
+@dp.message(Command("checkdb"))
+async def cmd_checkdb(message: Message):
+    """Показывает содержимое таблиц admins и users"""
+    if not is_super_admin(message.from_user.id):
+        await message.answer("⛔ Нет доступа.")
+        return
+
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+
+    # Проверяем admins
+    cur.execute("SELECT user_id, username, first_name, role, is_active FROM admins")
+    admins = cur.fetchall()
+
+    # Проверяем users
+    cur.execute("SELECT user_id, username, first_name FROM users ORDER BY user_id DESC LIMIT 10")
+    users = cur.fetchall()
+
+    conn.close()
+
+    text = "📊 <b>Диагностика БД</b>\n\n"
+
+    text += "👑 <b>Таблица admins:</b>\n"
+    if admins:
+        for a in admins:
+            text += f"• ID: {a[0]}, роль: {a[3]}, активен: {'✅' if a[4] else '❌'}\n"
+    else:
+        text += "❌ ПУСТО!\n"
+
+    text += f"\n👥 <b>Последние 10 пользователей в users:</b>\n"
+    if users:
+        for u in users:
+            text += f"• ID: {u[0]}, username: {u[1] or 'Нет'}, имя: {u[2] or 'Нет'}\n"
+    else:
+        text += "❌ ПУСТО!\n"
+
+    await message.answer(text, parse_mode="HTML")
+
+@dp.message(Command("forceadmin"))
+async def cmd_forceadmin(message: Message):
+    """Принудительно добавляет админа в БД"""
+    if not is_super_admin(message.from_user.id):
+        await message.answer("⛔ Нет доступа.")
+        return
+
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer("Использование: /forceadmin ID")
+        return
+
+    try:
+        user_id = int(parts[1])
+    except:
+        await message.answer("❌ Введите корректный ID.")
+        return
+
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+
+    # ПРЯМОЙ SQL-ЗАПРОС
+    cur.execute("""
+        INSERT OR IGNORE INTO users (user_id, username, first_name, reg_date)
+        VALUES (?, ?, ?, ?)
+    """, (user_id, None, f"User_{user_id}", datetime.now().isoformat()))
+
+    cur.execute("""
+        INSERT OR REPLACE INTO admins (user_id, username, first_name, role, added_at, is_active)
+        VALUES (?, ?, ?, 'admin', ?, 1)
+    """, (user_id, None, f"User_{user_id}", datetime.now().isoformat()))
+
+    conn.commit()
+
+    # Проверяем, что добавилось
+    cur.execute("SELECT user_id, role FROM admins WHERE user_id = ?", (user_id,))
+    result = cur.fetchone()
+    conn.close()
+
+    if result:
+        await message.answer(f"✅ Администратор {user_id} УСПЕШНО ДОБАВЛЕН!\n\nПроверьте: /admins")
+    else:
+        await message.answer(f"❌ Не удалось добавить админа {user_id}.")
+
 @dp.callback_query(F.data == "admin_remove")
 async def cb_admin_remove(callback: CallbackQuery, state: FSMContext):
     if not is_super_admin(callback.from_user.id):
