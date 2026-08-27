@@ -1235,7 +1235,9 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="ℹ️ О нас", callback_data="about")
     builder.adjust(2, 2, 2, 1)
     return builder.as_markup()
-
+def is_admin(user_id: int) -> bool:
+    """Проверяет, является ли пользователь активным админом (из БД)"""
+    return is_admin_db(user_id)
 
 def admin_menu_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
