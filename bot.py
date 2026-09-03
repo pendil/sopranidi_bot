@@ -84,23 +84,22 @@ async def run_db(func, *args, **kwargs):
     return await asyncio.to_thread(func, *args, **kwargs)
 
 
+def db_connect():
+    """Create a SQLite connection configured for concurrent bot access."""
+    conn = sqlite3.connect(DB_NAME, timeout=30)
+    conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
 # ===================== ФУНКЦИИ ГЕНЕРАЦИИ =====================
 def generate_order_code() -> str:
     return f"{random.choice(GREEK_LETTERS)}{random.randint(1000, 9999)}"
 
 
 def generate_unique_order_code() -> str:
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    for _ in range(100):
-        code = generate_order_code()
-        cur.execute("SELECT order_id FROM orders WHERE order_code = ?", (code,))
-        if not cur.fetchone():
-            conn.close()
-            return code
-    timestamp = str(int(datetime.now().timestamp()))[-6:]
-    conn.close()
-    return f"OMEGA{timestamp}"
+    """Generate an order code; uniqueness is ultimately enforced by the DB constraint."""
+    return generate_order_code()
 
 
 def generate_promo_code() -> str:
@@ -122,7 +121,7 @@ def format_price_with_discount(original_price: int, discount: int) -> str:
 
 # ===================== БАЗА ДАННЫХ =====================
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
 
     # Таблица пользователей
@@ -159,6 +158,7 @@ def init_db():
         cur.execute("ALTER TABLE users ADD COLUMN last_birthday_greet_year TEXT DEFAULT ''")
 
     # Таблица заказов
+    cur.execute("PRAGMA journal_mode = WAL")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS orders (
             order_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -178,6 +178,11 @@ def init_db():
             discount_applied INTEGER DEFAULT 0
         )
     """)
+
+    cur.execute("PRAGMA table_info(orders)")
+    order_columns = [col[1] for col in cur.fetchall()]
+    if "discount_code" not in order_columns:
+        cur.execute("ALTER TABLE orders ADD COLUMN discount_code TEXT DEFAULT ''")
 
     # Таблица услуг
     cur.execute("""
@@ -226,14 +231,16 @@ def init_db():
         )
     """)
 
-    # Добавляем первого супер-админа из .env
-    cur.execute("SELECT COUNT(*) FROM admins")
-    if cur.fetchone()[0] == 0 and ADMINS:
+    # Первый администратор из .env является супер-админом.
+    if ADMINS:
         cur.execute("""
-            INSERT OR IGNORE INTO admins (user_id, username, first_name, role, added_at)
-            VALUES (?, ?, ?, 'super_admin', ?)
+            INSERT INTO admins (user_id, username, first_name, role, added_at, is_active)
+            VALUES (?, ?, ?, 'super_admin', ?, 1)
+            ON CONFLICT(user_id) DO UPDATE SET
+                role = 'super_admin',
+                is_active = 1
         """, (ADMINS[0], None, 'Главный админ', datetime.now().isoformat()))
-        logging.info(f"✅ Супер-админ {ADMINS[0]} добавлен в БД")
+        logging.info(f"✅ Супер-админ {ADMINS[0]} синхронизирован с БД")
 
     # Таблица сообщений чата
     cur.execute("""
@@ -353,8 +360,12 @@ def init_db():
 # ===================== ФУНКЦИИ РАБОТЫ С БАЗОЙ =====================
 
 # ---- УПРАВЛЕНИЕ АДМИНАМИ ----
+def get_active_admin_ids():
+    return [row[0] for row in get_all_admins()]
+
+
 def get_all_admins():
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("""
         SELECT user_id, username, first_name, role, added_at
@@ -366,7 +377,7 @@ def get_all_admins():
 
 
 def get_admin(user_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("SELECT user_id, username, first_name, role, added_at FROM admins WHERE user_id = ? AND is_active = 1", (user_id,))
     row = cur.fetchone()
@@ -375,18 +386,22 @@ def get_admin(user_id: int):
 
 
 def add_admin(user_id: int, username: str = None, first_name: str = None, added_by: int = None):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("""
-        INSERT OR IGNORE INTO admins (user_id, username, first_name, role, added_by, added_at)
-        VALUES (?, ?, ?, 'admin', ?, ?)
+        INSERT INTO admins (user_id, username, first_name, role, added_by, added_at, is_active)
+        VALUES (?, ?, ?, 'admin', ?, ?, 1)
+        ON CONFLICT(user_id) DO UPDATE SET
+            username = excluded.username,
+            first_name = excluded.first_name,
+            is_active = 1
     """, (user_id, username, first_name, added_by, datetime.now().isoformat()))
     conn.commit()
     conn.close()
 
 
 def remove_admin(user_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("UPDATE admins SET is_active = 0 WHERE user_id = ?", (user_id,))
     conn.commit()
@@ -394,7 +409,7 @@ def remove_admin(user_id: int):
 
 
 def is_admin_db(user_id: int) -> bool:
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("SELECT 1 FROM admins WHERE user_id = ? AND is_active = 1", (user_id,))
     row = cur.fetchone()
@@ -403,7 +418,7 @@ def is_admin_db(user_id: int) -> bool:
 
 
 def is_super_admin(user_id: int) -> bool:
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("SELECT 1 FROM admins WHERE user_id = ? AND role = 'super_admin' AND is_active = 1", (user_id,))
     row = cur.fetchone()
@@ -413,39 +428,46 @@ def is_super_admin(user_id: int) -> bool:
 
 # ---- ВНУТРЕННИЙ ЧАТ ----
 def send_message(user_id: int, admin_id: int, message: str, is_from_admin: int = 0):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO chat_messages (user_id, admin_id, message, is_from_admin, created_at)
-        VALUES (?, ?, ?, ?, ?)
-    """, (user_id, admin_id, message, is_from_admin, datetime.now().isoformat()))
-
-    cur.execute("""
-        INSERT OR REPLACE INTO active_chats (user_id, last_message_at)
-        VALUES (?, ?)
-    """, (user_id, datetime.now().isoformat()))
-
-    conn.commit()
-    conn.close()
+    conn = db_connect()
+    try:
+        now = datetime.now().isoformat()
+        conn.execute("""
+            INSERT INTO chat_messages (user_id, admin_id, message, is_from_admin, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (user_id, admin_id, message, is_from_admin, now))
+        conn.execute("""
+            INSERT INTO active_chats (user_id, last_message_at, is_closed, closed_by)
+            VALUES (?, ?, 0, NULL)
+            ON CONFLICT(user_id) DO UPDATE SET
+                last_message_at = excluded.last_message_at,
+                is_closed = 0,
+                closed_by = NULL
+        """, (user_id, now))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def get_chat_history(user_id: int, limit: int = 50):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT id, message, is_from_admin, created_at
-        FROM chat_messages
-        WHERE user_id = ?
-        ORDER BY created_at ASC
-        LIMIT ?
-    """, (user_id, limit))
-    rows = cur.fetchall()
-    conn.close()
-    return rows
+    conn = db_connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, message, is_from_admin, created_at
+            FROM chat_messages
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+        """, (user_id, limit))
+        rows = cur.fetchall()
+        rows.reverse()
+        return rows
+    finally:
+        conn.close()
 
 
 def get_unread_count(user_id: int = None):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     if user_id:
         cur.execute("""
@@ -463,7 +485,7 @@ def get_unread_count(user_id: int = None):
 
 
 def mark_as_read(user_id: int, admin_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("""
         UPDATE chat_messages
@@ -475,7 +497,7 @@ def mark_as_read(user_id: int, admin_id: int):
 
 
 def get_active_chats():
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("""
         SELECT ac.user_id, u.username, u.first_name, ac.last_message_at,
@@ -491,7 +513,7 @@ def get_active_chats():
 
 
 def close_chat(user_id: int, admin_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("""
         UPDATE active_chats
@@ -502,8 +524,24 @@ def close_chat(user_id: int, admin_id: int):
     conn.close()
 
 
+def find_user_id_by_username(username: str):
+    username = username.lstrip("@").strip()
+    conn = db_connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT user_id FROM users WHERE lower(username) = lower(?)", (username,))
+        row = cur.fetchone()
+        if row:
+            return row[0]
+        cur.execute("SELECT user_id FROM admins WHERE lower(username) = lower(?) AND is_active = 1", (username,))
+        row = cur.fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
 def get_user_by_id(user_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("SELECT user_id, username, first_name, last_name FROM users WHERE user_id = ?", (user_id,))
     row = cur.fetchone()
@@ -517,18 +555,23 @@ def is_admin(user_id: int) -> bool:
 
 
 def add_user(user_id: int, username: str, first_name: str, last_name: str = ""):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT OR IGNORE INTO users (user_id, username, first_name, last_name, reg_date) VALUES (?, ?, ?, ?, ?)",
-        (user_id, username, first_name, last_name, datetime.now().isoformat())
-    )
-    conn.commit()
-    conn.close()
+    conn = db_connect()
+    try:
+        conn.execute("""
+            INSERT INTO users (user_id, username, first_name, last_name, reg_date)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username = excluded.username,
+                first_name = excluded.first_name,
+                last_name = excluded.last_name
+        """, (user_id, username, first_name, last_name, datetime.now().isoformat()))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def update_user_action(user_id: int, action: str):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute(
         "UPDATE users SET last_action = ?, action_date = ? WHERE user_id = ?",
@@ -539,7 +582,7 @@ def update_user_action(user_id: int, action: str):
 
 
 def add_user_log(user_id: int, action: str, details: str = ""):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute(
         "INSERT INTO user_logs (user_id, action, details, timestamp) VALUES (?, ?, ?, ?)",
@@ -550,7 +593,7 @@ def add_user_log(user_id: int, action: str, details: str = ""):
 
 
 def add_admin_log(admin_id: int, action: str, details: str = ""):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute(
         "INSERT INTO admin_logs (admin_id, action, details, timestamp) VALUES (?, ?, ?, ?)",
@@ -561,7 +604,7 @@ def add_admin_log(admin_id: int, action: str, details: str = ""):
 
 
 def get_user(user_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute(
         "SELECT user_id, username, first_name, last_name, reg_date, birthday, used_promocodes FROM users WHERE user_id = ?",
@@ -573,7 +616,7 @@ def get_user(user_id: int):
 
 
 def set_user_birthday(user_id: int, birthday: str):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("UPDATE users SET birthday = ? WHERE user_id = ?", (birthday, user_id))
     conn.commit()
@@ -581,7 +624,7 @@ def set_user_birthday(user_id: int, birthday: str):
 
 
 def add_used_promocode(user_id: int, promo_code: str):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("SELECT used_promocodes FROM users WHERE user_id = ?", (user_id,))
     row = cur.fetchone()
@@ -593,7 +636,7 @@ def add_used_promocode(user_id: int, promo_code: str):
 
 
 def set_pending_discount(user_id: int, discount: int, code: str):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute(
         "UPDATE users SET pending_discount = ?, pending_discount_code = ? WHERE user_id = ?",
@@ -604,7 +647,7 @@ def set_pending_discount(user_id: int, discount: int, code: str):
 
 
 def get_pending_discount(user_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("SELECT pending_discount, pending_discount_code FROM users WHERE user_id = ?", (user_id,))
     row = cur.fetchone()
@@ -614,8 +657,42 @@ def get_pending_discount(user_id: int):
     return row[0] or 0, row[1] or ""
 
 
+def consume_promocode_for_order(user_id: int, code: str):
+    """Atomically consume a promo code for a user. Returns (ok, discount, error)."""
+    if not code:
+        return True, 0, ""
+    conn = db_connect()
+    try:
+        cur = conn.cursor()
+        now = datetime.now().isoformat()
+        cur.execute("SELECT id, discount, valid_until, max_uses, used FROM promocodes WHERE code = ?", (code,))
+        promo = cur.fetchone()
+        if not promo:
+            return False, 0, "Промокод не найден."
+        promo_id, discount, valid_until, max_uses, used = promo
+        if datetime.now() > datetime.fromisoformat(valid_until):
+            return False, 0, "Срок действия промокода истёк."
+        cur.execute("SELECT 1 FROM user_promocodes WHERE user_id = ? AND promo_id = ?", (user_id, promo_id))
+        if cur.fetchone():
+            return False, 0, "Вы уже использовали этот промокод."
+        cur.execute("""UPDATE promocodes SET used = used + 1
+                       WHERE id = ? AND used < max_uses AND valid_until > ?""", (promo_id, now))
+        if cur.rowcount != 1:
+            conn.rollback()
+            return False, 0, "Промокод уже использован максимальное количество раз."
+        cur.execute("INSERT INTO user_promocodes (user_id, promo_id, used_at) VALUES (?, ?, ?)",
+                    (user_id, promo_id, now))
+        conn.commit()
+        return True, discount, ""
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def clear_pending_discount(user_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("UPDATE users SET pending_discount = 0, pending_discount_code = '' WHERE user_id = ?", (user_id,))
     conn.commit()
@@ -623,7 +700,7 @@ def clear_pending_discount(user_id: int):
 
 
 def get_users_with_birthday_today(today_str: str):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute(
         "SELECT user_id, first_name, last_birthday_greet_year FROM users WHERE birthday = ?",
@@ -635,40 +712,115 @@ def get_users_with_birthday_today(today_str: str):
 
 
 def mark_birthday_greeted(user_id: int, year: str):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("UPDATE users SET last_birthday_greet_year = ? WHERE user_id = ?", (year, user_id))
     conn.commit()
     conn.close()
 
 
-def add_order(user_id: int, service: str, price: int, is_urgent: int = 0, discount_applied: int = 0) -> tuple:
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    order_code = generate_unique_order_code()
-    cur.execute(
-        "INSERT INTO orders (user_id, service, price, status, created_at, order_code, is_urgent, discount_applied) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (user_id, service, price, "pending", datetime.now().isoformat(), order_code, is_urgent, discount_applied)
-    )
-    order_id = cur.lastrowid
-    conn.commit()
-    conn.close()
-    return order_id, order_code
+def create_order_transaction(user_id: int, service_id: int, service: str, base_price: int, is_urgent: int, pending_code: str = ""):
+    conn = db_connect()
+    try:
+        cur = conn.cursor()
+        now = datetime.now().isoformat()
+        # Best active promotion for this exact service (or global promotion).
+        cur.execute("""SELECT name, discount FROM promotions
+                       WHERE is_active = 1 AND valid_until > ? AND (service_id = ? OR service_id = 0)
+                       ORDER BY discount DESC LIMIT 1""", (now, service_id))
+        promotion = cur.fetchone()
+        promotion_name, promotion_discount = (promotion if promotion else ("", 0))
+        code_discount = 0
+        code_used = ""
+        if pending_code:
+            cur.execute("SELECT id, discount, valid_until, max_uses, used FROM promocodes WHERE code = ?", (pending_code,))
+            promo = cur.fetchone()
+            if not promo:
+                raise ValueError("Промокод не найден.")
+            promo_id, code_discount, valid_until, max_uses, used = promo
+            if datetime.now() > datetime.fromisoformat(valid_until):
+                raise ValueError("Срок действия промокода истёк.")
+            cur.execute("SELECT 1 FROM user_promocodes WHERE user_id = ? AND promo_id = ?", (user_id, promo_id))
+            if cur.fetchone():
+                raise ValueError("Вы уже использовали этот промокод.")
+            cur.execute("UPDATE promocodes SET used = used + 1 WHERE id = ? AND used < max_uses AND valid_until > ?", (promo_id, now))
+            if cur.rowcount != 1:
+                raise ValueError("Промокод уже использован максимальное количество раз.")
+            cur.execute("INSERT INTO user_promocodes (user_id, promo_id, used_at) VALUES (?, ?, ?)", (user_id, promo_id, now))
+            code_used = pending_code
+        final_discount = max(int(promotion_discount or 0), int(code_discount or 0))
+        discount_name = pending_code if code_discount >= promotion_discount and code_discount > 0 else (promotion_name or "")
+        final_price = max(1, round(base_price * (1 - final_discount / 100)))
+        for _ in range(10):
+            order_code = generate_order_code()
+            try:
+                cur.execute("""INSERT INTO orders
+                    (user_id, service, price, status, created_at, order_code, is_urgent, discount_applied, discount_code)
+                    VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?)""",
+                    (user_id, service, final_price, now, order_code, is_urgent, final_discount, code_used))
+                order_id = cur.lastrowid
+                if code_used:
+                    cur.execute("UPDATE users SET used_promocodes = CASE WHEN used_promocodes = '' OR used_promocodes IS NULL THEN ? ELSE used_promocodes || ',' || ? END, pending_discount = 0, pending_discount_code = '' WHERE user_id = ?", (code_used, code_used, user_id))
+                conn.commit()
+                return order_id, order_code, final_price, final_discount, discount_name
+            except sqlite3.IntegrityError as exc:
+                conn.rollback()
+                if "order_code" not in str(exc):
+                    raise
+                # Re-read/re-validate promo after rollback because the transaction was rolled back.
+                return create_order_transaction(user_id, service_id, service, base_price, is_urgent, pending_code)
+        raise RuntimeError("Не удалось сгенерировать уникальный код заказа")
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def add_order(user_id: int, service: str, price: int, is_urgent: int = 0, discount_applied: int = 0, discount_code: str = "") -> tuple:
+    """Create an order with retry on the UNIQUE order_code collision."""
+    conn = db_connect()
+    try:
+        for _ in range(10):
+            order_code = generate_order_code()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    """INSERT INTO orders
+                       (user_id, service, price, status, created_at, order_code, is_urgent, discount_applied, discount_code)
+                       VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?)""",
+                    (user_id, service, price, datetime.now().isoformat(), order_code, is_urgent, discount_applied, discount_code)
+                )
+                order_id = cur.lastrowid
+                conn.commit()
+                return order_id, order_code
+            except sqlite3.IntegrityError as exc:
+                conn.rollback()
+                if "order_code" not in str(exc):
+                    raise
+        raise RuntimeError("Не удалось сгенерировать уникальный код заказа")
+    finally:
+        conn.close()
 
 
 def update_order_status(order_id: int, status: str):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE orders SET status = ?, paid_at = ? WHERE order_id = ?",
-        (status, datetime.now().isoformat(), order_id)
-    )
-    conn.commit()
-    conn.close()
+    allowed = {"pending", "paid", "in_progress", "completed", "cancelled"}
+    if status not in allowed:
+        raise ValueError(f"Недопустимый статус заказа: {status}")
+    conn = db_connect()
+    try:
+        if status == "paid":
+            conn.execute("UPDATE orders SET status = ?, paid_at = COALESCE(paid_at, ?) WHERE order_id = ?",
+                         (status, datetime.now().isoformat(), order_id))
+        else:
+            conn.execute("UPDATE orders SET status = ? WHERE order_id = ?", (status, order_id))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def update_order_price(order_id: int, admin_price: int, admin_note: str = ""):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute(
         "UPDATE orders SET admin_price = ?, admin_note = ? WHERE order_id = ?",
@@ -679,7 +831,7 @@ def update_order_price(order_id: int, admin_price: int, admin_note: str = ""):
 
 
 def update_order_review(order_id: int, rating: int, review: str):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute(
         "UPDATE orders SET rating = ?, review = ? WHERE order_id = ?",
@@ -690,7 +842,7 @@ def update_order_review(order_id: int, rating: int, review: str):
 
 
 def update_order_file(order_id: int, file_id: str):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute(
         "UPDATE orders SET file_id = ? WHERE order_id = ?",
@@ -701,7 +853,7 @@ def update_order_file(order_id: int, file_id: str):
 
 
 def delete_order(order_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("DELETE FROM orders WHERE order_id = ?", (order_id,))
     conn.commit()
@@ -709,11 +861,11 @@ def delete_order(order_id: int):
 
 
 def delete_old_orders(days: int = 30):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cutoff_date = (datetime.now() - timedelta(days=days)).isoformat()
     cur.execute(
-        "DELETE FROM orders WHERE created_at < ? AND status IN ('paid', 'cancelled')",
+        "DELETE FROM orders WHERE created_at < ? AND status IN ('paid', 'completed', 'cancelled')",
         (cutoff_date,)
     )
     deleted_count = cur.rowcount
@@ -723,7 +875,7 @@ def delete_old_orders(days: int = 30):
 
 
 def get_order(order_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("""
         SELECT order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id, is_urgent
@@ -735,7 +887,7 @@ def get_order(order_id: int):
 
 
 def get_user_orders(user_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute(
         "SELECT order_id, service, price, status, created_at, admin_price, order_code, rating, review, is_urgent FROM orders WHERE user_id = ? ORDER BY created_at DESC",
@@ -747,7 +899,7 @@ def get_user_orders(user_id: int):
 
 
 def get_all_orders():
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("""
         SELECT o.order_id, o.user_id, u.username, o.service, o.price, o.status, o.created_at, o.paid_at, o.admin_price, o.admin_note, o.order_code, o.rating, o.review, o.is_urgent
@@ -761,27 +913,24 @@ def get_all_orders():
 
 
 def get_user_stats(user_id: int):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM orders WHERE user_id = ?", (user_id,))
-    total_orders = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM orders WHERE user_id = ? AND status='paid'", (user_id,))
-    paid_orders = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM orders WHERE user_id = ? AND status='in_progress'", (user_id,))
-    in_progress = cur.fetchone()[0]
-    cur.execute("SELECT SUM(price) FROM orders WHERE user_id = ? AND status='paid'", (user_id,))
-    total_spent = cur.fetchone()[0] or 0
-    conn.close()
-    return {
-        "total_orders": total_orders,
-        "paid_orders": paid_orders,
-        "in_progress": in_progress,
-        "total_spent": total_spent
-    }
+    conn = db_connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM orders WHERE user_id = ?", (user_id,))
+        total_orders = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM orders WHERE user_id = ? AND status IN ('paid', 'in_progress', 'completed')", (user_id,))
+        paid_orders = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM orders WHERE user_id = ? AND status = 'in_progress'", (user_id,))
+        in_progress = cur.fetchone()[0]
+        cur.execute("SELECT SUM(CASE WHEN admin_price > 0 THEN admin_price ELSE price END) FROM orders WHERE user_id = ? AND status IN ('paid', 'in_progress', 'completed')", (user_id,))
+        total_spent = cur.fetchone()[0] or 0
+        return {"total_orders": total_orders, "paid_orders": paid_orders, "in_progress": in_progress, "total_spent": total_spent}
+    finally:
+        conn.close()
 
 
 def get_all_users():
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute(
         "SELECT user_id, username, first_name, last_name, reg_date, last_action, action_date, birthday FROM users ORDER BY reg_date DESC")
@@ -791,7 +940,7 @@ def get_all_users():
 
 
 def get_all_reviews():
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("""
         SELECT o.order_code, o.service, o.rating, o.review, u.username, u.first_name, o.created_at
@@ -806,7 +955,7 @@ def get_all_reviews():
 
 
 def get_user_logs(user_id: int, limit: int = 20):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute(
         "SELECT action, details, timestamp FROM user_logs WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?",
@@ -818,40 +967,38 @@ def get_user_logs(user_id: int, limit: int = 20):
 
 
 def get_stats():
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM users")
-    user_count = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM orders")
-    total_orders = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM orders WHERE status='paid'")
-    paid_orders = cur.fetchone()[0]
-    cur.execute("SELECT SUM(price) FROM orders WHERE status='paid'")
-    total_income = cur.fetchone()[0] or 0
-    cur.execute("SELECT COUNT(*) FROM orders WHERE status='pending'")
-    pending_orders = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM orders WHERE status='cancelled'")
-    cancelled_orders = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM orders WHERE status='in_progress'")
-    in_progress = cur.fetchone()[0]
-    cur.execute("SELECT AVG(rating) FROM orders WHERE rating > 0")
-    avg_rating = cur.fetchone()[0] or 0
-    conn.close()
-    return {
-        "users": user_count,
-        "total_orders": total_orders,
-        "paid_orders": paid_orders,
-        "pending_orders": pending_orders,
-        "cancelled_orders": cancelled_orders,
-        "in_progress": in_progress,
-        "income": total_income,
-        "avg_rating": round(avg_rating, 1)
-    }
+    conn = db_connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM users")
+        user_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM orders")
+        total_orders = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM orders WHERE status IN ('paid', 'in_progress', 'completed')")
+        paid_orders = cur.fetchone()[0]
+        cur.execute("SELECT SUM(CASE WHEN admin_price > 0 THEN admin_price ELSE price END) FROM orders WHERE status IN ('paid', 'in_progress', 'completed')")
+        total_income = cur.fetchone()[0] or 0
+        cur.execute("SELECT COUNT(*) FROM orders WHERE status='pending'")
+        pending_orders = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM orders WHERE status='cancelled'")
+        cancelled_orders = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM orders WHERE status='in_progress'")
+        in_progress = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM orders WHERE status='completed'")
+        completed_orders = cur.fetchone()[0]
+        cur.execute("SELECT AVG(rating) FROM orders WHERE rating > 0")
+        avg_rating = cur.fetchone()[0] or 0
+        return {"users": user_count, "total_orders": total_orders, "paid_orders": paid_orders,
+                "pending_orders": pending_orders, "cancelled_orders": cancelled_orders,
+                "in_progress": in_progress, "completed_orders": completed_orders,
+                "income": total_income, "avg_rating": round(avg_rating, 1)}
+    finally:
+        conn.close()
 
 
 # ===================== УПРАВЛЕНИЕ УСЛУГАМИ =====================
 def get_all_services():
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("SELECT id, name, description, price, is_active FROM services ORDER BY id")
     rows = cur.fetchall()
@@ -860,7 +1007,7 @@ def get_all_services():
 
 
 def get_service(service_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("SELECT id, name, description, price, is_active FROM services WHERE id = ?", (service_id,))
     row = cur.fetchone()
@@ -869,7 +1016,7 @@ def get_service(service_id: int):
 
 
 def add_service(name: str, description: str, price: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute(
         "INSERT INTO services (name, description, price, created_at) VALUES (?, ?, ?, ?)",
@@ -882,7 +1029,7 @@ def add_service(name: str, description: str, price: int):
 
 
 def update_service(service_id: int, name: str, description: str, price: int, is_active: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute(
         "UPDATE services SET name = ?, description = ?, price = ?, is_active = ? WHERE id = ?",
@@ -893,7 +1040,7 @@ def update_service(service_id: int, name: str, description: str, price: int, is_
 
 
 def delete_service(service_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("DELETE FROM services WHERE id = ?", (service_id,))
     conn.commit()
@@ -914,7 +1061,7 @@ def get_services_keyboard(services: list) -> InlineKeyboardMarkup:
 
 # ===================== УПРАВЛЕНИЕ АКЦИЯМИ =====================
 def create_promotion(name: str, description: str, discount: int, valid_until: str, service_id: int = 0):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute(
         "INSERT INTO promotions (name, description, discount, valid_until, service_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -927,7 +1074,7 @@ def create_promotion(name: str, description: str, discount: int, valid_until: st
 
 
 def get_active_promotions(service_id: int = 0):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     if service_id > 0:
         cur.execute(
@@ -948,7 +1095,7 @@ def get_active_promotions(service_id: int = 0):
 
 
 def get_all_promotions():
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute(
         "SELECT id, name, description, discount, valid_until, is_active, created_at, service_id FROM promotions ORDER BY id DESC"
@@ -959,7 +1106,7 @@ def get_all_promotions():
 
 
 def get_promotion_by_id(promo_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute(
         "SELECT id, name, description, discount, valid_until, is_active, service_id FROM promotions WHERE id = ?",
@@ -970,7 +1117,7 @@ def get_promotion_by_id(promo_id: int):
 
 
 def activate_promotion(promo_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("UPDATE promotions SET is_active = 1 WHERE id = ?", (promo_id,))
     conn.commit()
@@ -978,7 +1125,7 @@ def activate_promotion(promo_id: int):
 
 
 def deactivate_promotion(promo_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("UPDATE promotions SET is_active = 0 WHERE id = ?", (promo_id,))
     conn.commit()
@@ -986,7 +1133,7 @@ def deactivate_promotion(promo_id: int):
 
 
 def delete_promotion(promo_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("DELETE FROM promotions WHERE id = ?", (promo_id,))
     conn.commit()
@@ -994,7 +1141,7 @@ def delete_promotion(promo_id: int):
 
 
 def get_service_discount(service_id: int, user_id: int) -> tuple:
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute(
         "SELECT id, name, description, discount, valid_until FROM promotions "
@@ -1027,7 +1174,7 @@ def get_service_discount(service_id: int, user_id: int) -> tuple:
 
 # ===================== ПРОМОКОДЫ =====================
 def create_promocode(code: str, discount: int, valid_until: str, max_uses: int, admin_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute(
         "INSERT INTO promocodes (code, discount, valid_until, max_uses, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -1040,7 +1187,7 @@ def create_promocode(code: str, discount: int, valid_until: str, max_uses: int, 
 
 
 def get_promocode(code: str):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("SELECT id, code, discount, valid_until, max_uses, used FROM promocodes WHERE code = ?", (code,))
     row = cur.fetchone()
@@ -1049,7 +1196,7 @@ def get_promocode(code: str):
 
 
 def use_promocode(promo_id: int, user_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("UPDATE promocodes SET used = used + 1 WHERE id = ?", (promo_id,))
     cur.execute(
@@ -1061,7 +1208,7 @@ def use_promocode(promo_id: int, user_id: int):
 
 
 def get_all_promocodes():
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("SELECT id, code, discount, valid_until, max_uses, used FROM promocodes ORDER BY id DESC")
     rows = cur.fetchall()
@@ -1070,7 +1217,7 @@ def get_all_promocodes():
 
 
 def delete_promocode(promo_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("DELETE FROM promocodes WHERE id = ?", (promo_id,))
     conn.commit()
@@ -1079,7 +1226,7 @@ def delete_promocode(promo_id: int):
 
 # ===================== ГОЛОСОВАНИЯ =====================
 def create_poll(question: str, options: list, created_by: int, expires_in_hours: int = 24):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     options_str = "||".join(options)
     expires_at = (datetime.now() + timedelta(hours=expires_in_hours)).isoformat()
@@ -1094,7 +1241,7 @@ def create_poll(question: str, options: list, created_by: int, expires_in_hours:
 
 
 def get_poll(poll_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("SELECT id, question, options, created_by, created_at, expires_at, is_active FROM polls WHERE id = ?",
                 (poll_id,))
@@ -1104,7 +1251,7 @@ def get_poll(poll_id: int):
 
 
 def get_all_polls():
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("SELECT id, question, created_at, expires_at, is_active FROM polls ORDER BY id DESC")
     rows = cur.fetchall()
@@ -1113,7 +1260,7 @@ def get_all_polls():
 
 
 def vote_poll(poll_id: int, user_id: int, option: str):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("SELECT id FROM poll_votes WHERE poll_id = ? AND user_id = ?", (poll_id, user_id))
     if cur.fetchone():
@@ -1129,7 +1276,7 @@ def vote_poll(poll_id: int, user_id: int, option: str):
 
 
 def get_poll_results(poll_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("SELECT option_text, COUNT(*) FROM poll_votes WHERE poll_id = ? GROUP BY option_text", (poll_id,))
     rows = cur.fetchall()
@@ -1138,7 +1285,7 @@ def get_poll_results(poll_id: int):
 
 
 def get_poll_user_vote(poll_id: int, user_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("SELECT option_text FROM poll_votes WHERE poll_id = ? AND user_id = ?", (poll_id, user_id))
     row = cur.fetchone()
@@ -1147,7 +1294,7 @@ def get_poll_user_vote(poll_id: int, user_id: int):
 
 
 def close_poll(poll_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("UPDATE polls SET is_active = 0 WHERE id = ?", (poll_id,))
     conn.commit()
@@ -1155,7 +1302,7 @@ def close_poll(poll_id: int):
 
 
 def get_expired_active_polls():
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute(
         "SELECT id, question FROM polls WHERE is_active = 1 AND expires_at < ?",
@@ -1342,7 +1489,7 @@ def orders_keyboard(orders: list, page: int = 0) -> InlineKeyboardMarkup:
     for order in page_orders:
         order_id, user_id, username, service, price, status, _, _, admin_price, _, order_code, rating, _, is_urgent = order[
             :14]
-        status_emoji = "✅" if status == "paid" else "⏳" if status == "pending" else "🔧" if status == "in_progress" else "❌"
+        status_emoji = "⏳" if status == "pending" else "💳" if status == "paid" else "🔧" if status == "in_progress" else "✅" if status == "completed" else "❌"
         urgent = "🔥" if is_urgent else ""
         final_price = admin_price if admin_price > 0 else price
         display_code = order_code or f"#{order_id}"
@@ -1369,15 +1516,18 @@ def order_detail_keyboard(order_id: int, status: str, is_urgent: int = 0) -> Inl
     if status == "pending":
         builder.button(text="✅ Подтвердить оплату", callback_data=f"confirm_payment_{order_id}")
         builder.button(text="💰 Назначить цену", callback_data=f"set_price_{order_id}")
-        builder.button(text="🔧 В работу", callback_data=f"start_work_{order_id}")
-        builder.button(text="❌ Удалить заказ", callback_data=f"delete_order_{order_id}")
-        if is_urgent:
-            builder.button(text="🔥 Принять срочный заказ", callback_data=f"accept_urgent_{order_id}")
-    elif status == "in_progress":
-        builder.button(text="✅ Завершить работу", callback_data=f"complete_work_{order_id}")
         builder.button(text="❌ Удалить заказ", callback_data=f"delete_order_{order_id}")
     elif status == "paid":
+        builder.button(text="🔧 В работу", callback_data=f"start_work_{order_id}")
+        if is_urgent:
+            builder.button(text="🔥 Принять срочный заказ", callback_data=f"accept_urgent_{order_id}")
+        builder.button(text="❌ Удалить заказ", callback_data=f"delete_order_{order_id}")
+    elif status == "in_progress":
         builder.button(text="📎 Прикрепить файл", callback_data=f"attach_file_{order_id}")
+        builder.button(text="✅ Завершить работу", callback_data=f"complete_work_{order_id}")
+        builder.button(text="❌ Удалить заказ", callback_data=f"delete_order_{order_id}")
+    elif status == "completed":
+        builder.button(text="📎 Обновить файл", callback_data=f"attach_file_{order_id}")
         builder.button(text="❌ Удалить заказ", callback_data=f"delete_order_{order_id}")
     builder.button(text="🔙 Назад к заказам", callback_data="admin_orders")
     builder.adjust(1)
@@ -1388,7 +1538,7 @@ def order_user_keyboard(order_id: int, status: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     if status == "pending":
         builder.button(text="❌ Отменить заказ", callback_data=f"cancel_order_{order_id}")
-    if status == "paid":
+    if status == "completed":
         builder.button(text="⭐ Оставить отзыв", callback_data=f"review_order_{order_id}")
     builder.button(text="🔄 Обновить", callback_data=f"refresh_order_{order_id}")
     builder.button(text="🔙 Назад", callback_data="my_orders")
@@ -1528,7 +1678,10 @@ async def send_safe_message(message: Message, text: str, reply_markup=None, pars
         await message.answer(text, reply_markup=reply_markup, parse_mode=parse_mode)
     except Exception as e:
         logging.error(f"Ошибка отправки сообщения: {e}")
-        await message.answer(text, reply_markup=reply_markup)
+        try:
+            await message.answer(escape_html(text), reply_markup=reply_markup)
+        except Exception as fallback_error:
+            logging.error(f"Ошибка резервной отправки сообщения: {fallback_error}")
 
 
 # ===================== ОБРАБОТЧИКИ КОМАНД =====================
@@ -1548,7 +1701,7 @@ async def cmd_start(message: Message):
 
 <b>🔐 Важная информация:</b>
 • Каждый готовый продукт абсолютно индивидуален и создаётся под ваш запрос
-• Все работы хранятся в децентрализованном дата-центре, гарантирующем полную конфиденциальность и недоступность для третьих лиц
+• Мы принимаем меры для защиты данных и ограничиваем доступ к ним только в рамках работы сервиса
 • Мы соблюдаем все стандарты академической этики и оригинальности
 
 Выберите необходимый сервис в меню ниже 👇
@@ -1696,6 +1849,7 @@ async def cmd_admin(message: Message):
 ✅ Оплаченных: <b>{stats['paid_orders']}</b>
 ⏳ Ожидают оплаты: <b>{stats['pending_orders']}</b>
 🔧 В работе: <b>{stats['in_progress']}</b>
+✅ Выполнено: <b>{stats['completed_orders']}</b>
 ❌ Отменённых: <b>{stats['cancelled_orders']}</b>
 💰 Доход: <b>{stats['income']} руб.</b>
 ⭐ Средняя оценка: <b>{stats['avg_rating']}</b>
@@ -1735,7 +1889,7 @@ async def cmd_addadmin(message: Message):
         user_id = int(user_input)
     elif user_input.startswith("@"):
         username = user_input.replace("@", "")
-        conn = sqlite3.connect(DB_NAME)
+        conn = db_connect()
         cur = conn.cursor()
         cur.execute("SELECT user_id FROM users WHERE username = ?", (username,))
         row = cur.fetchone()
@@ -1745,7 +1899,7 @@ async def cmd_addadmin(message: Message):
     elif "t.me/" in user_input:
         username = user_input.split("t.me/")[-1].replace("/", "").strip()
         username = username.replace("@", "")
-        conn = sqlite3.connect(DB_NAME)
+        conn = db_connect()
         cur = conn.cursor()
         cur.execute("SELECT user_id FROM users WHERE username = ?", (username,))
         row = cur.fetchone()
@@ -2030,13 +2184,18 @@ async def cb_apply_promocode(callback: CallbackQuery, state: FSMContext):
 @dp.message(UserPromocodeState.waiting_for_code)
 async def process_promocode(message: Message, state: FSMContext):
     user_id = message.from_user.id
-    code = message.text.strip().upper()
+    code = (message.text or "").strip().upper()
     promo = await run_db(get_promocode, code)
     if not promo:
         await message.answer("❌ Промокод не найден. Проверьте правильность ввода.", parse_mode="HTML")
         return
-    promo_id, promo_code, discount, valid_until, max_uses, used = promo
-    if datetime.now() > datetime.fromisoformat(valid_until):
+    _, _, discount, valid_until, max_uses, used = promo
+    try:
+        valid = datetime.fromisoformat(valid_until)
+    except ValueError:
+        await message.answer("❌ У промокода повреждена дата окончания.", parse_mode="HTML")
+        return
+    if datetime.now() > valid:
         await message.answer("❌ Срок действия промокода истёк.", parse_mode="HTML")
         return
     if used >= max_uses:
@@ -2046,11 +2205,9 @@ async def process_promocode(message: Message, state: FSMContext):
     if user and user[6] and code in user[6].split(","):
         await message.answer("❌ Вы уже использовали этот промокод.", parse_mode="HTML")
         return
-    await run_db(use_promocode, promo_id, user_id)
-    await run_db(add_used_promocode, user_id, code)
     await run_db(set_pending_discount, user_id, discount, code)
     await message.answer(
-        f"✅ Промокод <b>{escape_html(code)}</b> применён!\n\n🎉 Скидка: <b>{discount}%</b>\n\nСкидка будет автоматически применена к вашему следующему заказу!",
+        f"✅ Промокод <b>{escape_html(code)}</b> выбран!\n\n🎉 Скидка: <b>{discount}%</b>\n\nСкидка будет списана только при создании следующего заказа.",
         parse_mode="HTML"
     )
     await state.clear()
@@ -2070,11 +2227,11 @@ Sopranidi Corp. — экосистема профессиональных реш
 <b>🔒 Наши стандарты качества:</b>
 • Каждый проект разрабатывается индивидуально под ваши требования
 • Гарантируем 100% оригинальность и соответствие академическим стандартам
-• Все работы шифруются и хранятся в децентрализованных дата-центрах
+• Данные хранятся в используемой сервисом инфраструктуре с ограничением доступа
 • Строгое соблюдение сроков и конфиденциальность данных
 
 <b>📊 Технологическая безопасность:</b>
-Ваши проекты защищены многоуровневой системой шифрования. Доступ к данным имеют только авторизованные сотрудники.
+Доступ к данным ограничен сотрудниками, которым он необходим для обработки заказа.
 
 <b>📌 Контакты:</b>
 👤 Диспетчер: {DISPATCHER_USERNAME}
@@ -2114,6 +2271,7 @@ async def cb_admin_stats(callback: CallbackQuery):
 ✅ Оплаченных: {stats['paid_orders']}
 ⏳ Ожидают оплаты: {stats['pending_orders']}
 🔧 В работе: {stats['in_progress']}
+✅ Выполнено: {stats['completed_orders']}
 ❌ Отменённых: {stats['cancelled_orders']}
 💰 Доход: {stats['income']} руб.
 ⭐ Средняя оценка: {stats['avg_rating']}
@@ -2155,86 +2313,49 @@ async def cb_admin_admins(callback: CallbackQuery):
     await callback.answer()
 
 
-@dp.message(StateFilter("waiting_for_admin_id"))
+@dp.callback_query(F.data == "admin_add")
+async def cb_admin_add(callback: CallbackQuery, state: FSMContext):
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer("⛔ Только супер-админ может добавлять администраторов", show_alert=True)
+        return
+    text = (
+        "👑 <b>Добавление администратора</b>\n\n"
+        "Введите Telegram ID, @username или ссылку t.me/username.\n\n"
+        "Пользователь должен хотя бы один раз написать боту /start."
+    )
+    await callback.message.edit_text(text, reply_markup=back_to_admin_keyboard(), parse_mode="HTML")
+    await state.set_state(AdminAddState.waiting_for_user_id)
+    await callback.answer()
+
+
+@dp.message(AdminAddState.waiting_for_user_id)
 async def process_admin_add(message: Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        await message.answer("⛔ Нет доступа.", parse_mode="HTML")
+    if not is_super_admin(message.from_user.id):
+        await message.answer("⛔ Только супер-админ может управлять администраторами.", parse_mode="HTML")
         await state.clear()
         return
-
-    text = message.text.strip()
+    text = (message.text or "").strip()
     user_id = None
-
-    # Если просто число
     if text.isdigit():
         user_id = int(text)
-
-    # Если ссылка t.me/username
+    elif text.startswith("@"):
+        user_id = await run_db(find_user_id_by_username, text)
     elif "t.me/" in text:
-        # Извлекаем username из ссылки
-        username = text.split("t.me/")[-1].replace("/", "").strip()
-        # Убираем @ если есть
-        username = username.replace("@", "")
-
-        conn = sqlite3.connect(DB_NAME)
-        cur = conn.cursor()
-        cur.execute("SELECT user_id FROM users WHERE username = ?", (username,))
-        row = cur.fetchone()
-        conn.close()
-        if row:
-            user_id = row[0]
-        else:
-            # Пробуем найти по username в admins
-            conn = sqlite3.connect(DB_NAME)
-            cur = conn.cursor()
-            cur.execute("SELECT user_id FROM admins WHERE username = ? AND is_active = 1", (username,))
-            row = cur.fetchone()
-            conn.close()
-            if row:
-                user_id = row[0]
-
-    # Если просто username (без t.me/)
-    if not user_id and text.startswith("@"):
-        username = text.replace("@", "")
-        conn = sqlite3.connect(DB_NAME)
-        cur = conn.cursor()
-        cur.execute("SELECT user_id FROM users WHERE username = ?", (username,))
-        row = cur.fetchone()
-        conn.close()
-        if row:
-            user_id = row[0]
-
+        username = text.split("t.me/", 1)[1].split("?", 1)[0].strip("/")
+        user_id = await run_db(find_user_id_by_username, username)
     if not user_id:
-        await message.answer(
-            "❌ Не удалось определить ID пользователя.\n\n"
-            "Попробуйте:\n"
-            "1. Отправить ID (число)\n"
-            "2. Отправить ссылку t.me/username\n"
-            "3. Отправить @username\n\n"
-            "Или попросите пользователя написать боту команду /start, чтобы он появился в базе.",
-            parse_mode="HTML"
-        )
+        await message.answer("❌ Не удалось определить пользователя. Используйте Telegram ID, @username или t.me/username. Пользователь должен сначала написать боту /start.", parse_mode="HTML")
         return
-
     if await run_db(is_admin_db, user_id):
-        await message.answer("❌ Этот пользователь уже является админом.", parse_mode="HTML")
+        await message.answer("❌ Этот пользователь уже является администратором.", parse_mode="HTML")
         await state.clear()
         return
-
-    # Получаем данные пользователя
     user = await run_db(get_user_by_id, user_id)
     username = user[1] if user else None
     first_name = user[2] if user else None
-
     await run_db(add_admin, user_id, username, first_name, message.from_user.id)
     await run_db(add_admin_log, message.from_user.id, "add_admin", f"Добавил админа {user_id}")
-
-    await message.answer(
-        f"✅ Администратор <b>{username or first_name or str(user_id)}</b> успешно добавлен!\n\n"
-        f"📌 Теперь он может использовать /admin",
-        reply_markup=admin_menu_keyboard(),
-        parse_mode="HTML"
-    )
+    await message.answer(f"✅ Администратор <b>{escape_html(username or first_name or str(user_id))}</b> успешно добавлен!", reply_markup=admin_menu_keyboard(), parse_mode="HTML")
     await state.clear()
 
 
@@ -2245,7 +2366,7 @@ async def cmd_checkdb(message: Message):
         await message.answer("⛔ Нет доступа.")
         return
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
 
     # Проверяем admins
@@ -2294,7 +2415,7 @@ async def cmd_forceadmin(message: Message):
         await message.answer("❌ Введите корректный ID.")
         return
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
 
     # ПРЯМОЙ SQL-ЗАПРОС
@@ -2321,6 +2442,19 @@ async def cmd_forceadmin(message: Message):
         await message.answer(f"❌ Не удалось добавить админа {user_id}.")
 
 
+@dp.callback_query(F.data == "admin_remove")
+async def cb_admin_remove(callback: CallbackQuery, state: FSMContext):
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer("⛔ Только супер-админ может удалять администраторов", show_alert=True)
+        return
+    await callback.message.edit_text(
+        "🗑️ <b>Удаление администратора</b>\n\nВведите Telegram ID администратора, которого нужно удалить:",
+        reply_markup=back_to_admin_keyboard(), parse_mode="HTML"
+    )
+    await state.set_state(AdminRemoveState.waiting_for_user_id)
+    await callback.answer()
+
+
 @dp.callback_query(F.data.startswith("admin_remove_"))
 async def cb_admin_remove_confirm(callback: CallbackQuery):
     if not is_super_admin(callback.from_user.id):
@@ -2332,6 +2466,13 @@ async def cb_admin_remove_confirm(callback: CallbackQuery):
         await callback.answer("❌ Нельзя удалить самого себя", show_alert=True)
         return
 
+    admin = await run_db(get_admin, user_id)
+    if not admin:
+        await callback.answer("❌ Администратор не найден", show_alert=True)
+        return
+    if admin[3] == "super_admin":
+        await callback.answer("❌ Нельзя удалить супер-админа", show_alert=True)
+        return
     await run_db(remove_admin, user_id)
     await run_db(add_admin_log, callback.from_user.id, "remove_admin", f"Удалил админа {user_id}")
 
@@ -2408,45 +2549,39 @@ async def cb_chat_open(callback: CallbackQuery, state: FSMContext):
 
     await update_message(callback, text, keyboard.as_markup(), "HTML")
 
-    await state.set_state("chat_sending")
+    await state.set_state(ChatState.sending)
     await state.update_data(chat_user_id=user_id)
 
     await callback.answer()
 
 
-@dp.message(StateFilter("chat_sending"))
+@dp.message(ChatState.sending)
 async def chat_send_message(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         await message.answer("⛔ Нет доступа", parse_mode="HTML")
         await state.clear()
         return
-
     data = await state.get_data()
     user_id = data.get("chat_user_id")
-
     if not user_id:
         await message.answer("❌ Чат не найден.", parse_mode="HTML")
         await state.clear()
         return
-
     if message.text and message.text.startswith("/"):
         return
-
-    await run_db(send_message, user_id, message.from_user.id, message.text, 1)
-    await run_db(add_admin_log, message.from_user.id, "chat_message", f"Отправил сообщение пользователю {user_id}: {message.text[:50]}...")
-
+    text = message.text or ""
+    if not text.strip():
+        await message.answer("❌ Отправьте текстовое сообщение.")
+        return
+    await run_db(send_message, user_id, message.from_user.id, text, 1)
+    await run_db(add_admin_log, message.from_user.id, "chat_message", f"Отправил сообщение пользователю {user_id}: {text[:50]}...")
     try:
-        await bot.send_message(
-            user_id,
-            f"📩 <b>Сообщение от администратора</b>\n\n{escape_html(message.text)}\n\n✏️ Вы можете ответить в этом чате.",
-            parse_mode="HTML"
-        )
-        await message.answer("✅ Сообщение отправлено!", parse_mode="HTML")
+        await bot.send_message(user_id, f"📩 <b>Сообщение от администратора</b>\n\n{escape_html(text)}\n\n✏️ Вы можете ответить в этом чате.", parse_mode="HTML")
+        await message.answer("✅ Сообщение отправлено!\n\nЧтобы продолжить диалог, отправьте следующее сообщение.", parse_mode="HTML")
     except Exception as e:
         logging.error(f"Ошибка отправки сообщения пользователю {user_id}: {e}")
         await message.answer("❌ Не удалось отправить сообщение пользователю.", parse_mode="HTML")
-
-    await cb_chat_open(message, state)
+    await state.clear()
 
 
 @dp.callback_query(F.data.startswith("chat_close_"))
@@ -2638,51 +2773,78 @@ async def process_promotion_valid_until(message: Message, state: FSMContext):
 
 
 @dp.callback_query(F.data == "promotion_activate")
-async def cb_promotion_activate(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("⛔ Нет доступа", show_alert=True)
+async def cb_promotion_activate(callback: CallbackQuery, state: FSMContext):
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer("⛔ Только супер-админ имеет доступ", show_alert=True)
         return
-    await callback.message.edit_text(
-        "🔄 <b>Активация акции</b>\n\n"
-        "Введите ID акции, которую хотите активировать.\n\n"
-        "Чтобы узнать ID, посмотрите список акций выше.\n\n"
-        "Пример: 1",
-        reply_markup=back_to_admin_keyboard(),
-        parse_mode="HTML"
-    )
+    await callback.message.edit_text("🔄 <b>Активация акции</b>\n\nВведите ID акции:", reply_markup=back_to_admin_keyboard(), parse_mode="HTML")
+    await state.set_state(AdminActivateState.waiting_for_promo_id)
     await callback.answer()
 
 
 @dp.callback_query(F.data == "promotion_deactivate")
-async def cb_promotion_deactivate(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("⛔ Нет доступа", show_alert=True)
+async def cb_promotion_deactivate(callback: CallbackQuery, state: FSMContext):
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer("⛔ Только супер-админ имеет доступ", show_alert=True)
         return
-    await callback.message.edit_text(
-        "⏹️ <b>Деактивация акции</b>\n\n"
-        "Введите ID акции, которую хотите деактивировать.\n\n"
-        "Чтобы узнать ID, посмотрите список акций выше.\n\n"
-        "Пример: 1",
-        reply_markup=back_to_admin_keyboard(),
-        parse_mode="HTML"
-    )
+    await callback.message.edit_text("⏹️ <b>Деактивация акции</b>\n\nВведите ID акции:", reply_markup=back_to_admin_keyboard(), parse_mode="HTML")
+    await state.set_state(AdminDeactivateState.waiting_for_promo_id)
     await callback.answer()
 
 
 @dp.callback_query(F.data == "promotion_delete")
-async def cb_promotion_delete(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("⛔ Нет доступа", show_alert=True)
+async def cb_promotion_delete(callback: CallbackQuery, state: FSMContext):
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer("⛔ Только супер-админ имеет доступ", show_alert=True)
         return
-    await callback.message.edit_text(
-        "🗑️ <b>Удаление акции</b>\n\n"
-        "Введите ID акции, которую хотите удалить.\n\n"
-        "Чтобы узнать ID, посмотрите список акций выше.\n\n"
-        "Пример: 1",
-        reply_markup=back_to_admin_keyboard(),
-        parse_mode="HTML"
-    )
+    await callback.message.edit_text("🗑️ <b>Удаление акции</b>\n\nВведите ID акции:\n\n⚠️ Действие нельзя отменить.", reply_markup=back_to_admin_keyboard(), parse_mode="HTML")
+    await state.set_state(AdminDeletePromoState.waiting_for_promo_id)
     await callback.answer()
+
+
+@dp.message(AdminActivateState.waiting_for_promo_id)
+async def process_promotion_activate(message: Message, state: FSMContext):
+    if not is_super_admin(message.from_user.id):
+        await state.clear(); await message.answer("⛔ Нет доступа."); return
+    try: promo_id = int((message.text or "").strip())
+    except ValueError:
+        await message.answer("❌ Введите корректный ID."); return
+    promo = await run_db(get_promotion_by_id, promo_id)
+    if not promo:
+        await message.answer("❌ Акция не найдена."); return
+    await run_db(activate_promotion, promo_id)
+    await run_db(add_admin_log, message.from_user.id, "activate_promotion", f"Активировал акцию {promo[1]}")
+    await state.clear(); await message.answer(f"✅ Акция <b>{escape_html(promo[1])}</b> активирована.", reply_markup=admin_menu_keyboard(), parse_mode="HTML")
+
+
+@dp.message(AdminDeactivateState.waiting_for_promo_id)
+async def process_promotion_deactivate(message: Message, state: FSMContext):
+    if not is_super_admin(message.from_user.id):
+        await state.clear(); await message.answer("⛔ Нет доступа."); return
+    try: promo_id = int((message.text or "").strip())
+    except ValueError:
+        await message.answer("❌ Введите корректный ID."); return
+    promo = await run_db(get_promotion_by_id, promo_id)
+    if not promo:
+        await message.answer("❌ Акция не найдена."); return
+    await run_db(deactivate_promotion, promo_id)
+    await run_db(add_admin_log, message.from_user.id, "deactivate_promotion", f"Деактивировал акцию {promo[1]}")
+    await state.clear(); await message.answer(f"✅ Акция <b>{escape_html(promo[1])}</b> деактивирована.", reply_markup=admin_menu_keyboard(), parse_mode="HTML")
+
+
+@dp.message(AdminDeletePromoState.waiting_for_promo_id)
+async def process_promotion_delete(message: Message, state: FSMContext):
+    if not is_super_admin(message.from_user.id):
+        await state.clear(); await message.answer("⛔ Нет доступа."); return
+    try: promo_id = int((message.text or "").strip())
+    except ValueError:
+        await message.answer("❌ Введите корректный ID."); return
+    promo = await run_db(get_promotion_by_id, promo_id)
+    if not promo:
+        await message.answer("❌ Акция не найдена."); return
+    await run_db(delete_promotion, promo_id)
+    await run_db(add_admin_log, message.from_user.id, "delete_promotion", f"Удалил акцию {promo[1]}")
+    await state.clear(); await message.answer(f"✅ Акция <b>{escape_html(promo[1])}</b> удалена.", reply_markup=admin_menu_keyboard(), parse_mode="HTML")
 
 
 # ===================== ГЛАВНЫЙ ОБРАБОТЧИК ДЛЯ ВСЕХ ЦИФРОВЫХ СООБЩЕНИЙ =====================
@@ -2730,38 +2892,6 @@ async def cmd_promo(message: Message):
     )
 
 
-@dp.message(AdminSetPriceState.waiting_for_price)
-async def cb_set_price_process(message: Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        await message.answer("⛔ Нет доступа.", parse_mode="HTML")
-        await state.clear()
-        return
-
-    try:
-        new_price = int(message.text.strip())
-    except ValueError:
-        await message.answer("❌ Введите число. Например: 5000", parse_mode="HTML")
-        return
-
-    if new_price <= 0:
-        await message.answer("❌ Цена должна быть больше 0.", parse_mode="HTML")
-        return
-
-    data = await state.get_data()
-    order_id = data.get("order_id")
-    order = await run_db(get_order, order_id)
-    order_code = order[9] if order else f"#{order_id}"
-
-    await run_db(update_order_price, order_id, new_price, "")
-    await run_db(add_admin_log, message.from_user.id, "set_price",
-                 f"Назначил цену {new_price} руб. для заказа {order_code}")
-
-    await message.answer(
-        f"✅ Цена для заказа <b>{escape_html(order_code)}</b> обновлена на <b>{new_price} руб.</b>",
-        parse_mode="HTML"
-    )
-    await state.clear()
-    await send_order_detail_message(message, order_id)
 
 
 @dp.callback_query(F.data.startswith("promotion_do_activate_"))
@@ -3301,7 +3431,7 @@ async def cb_user_orders_detail(callback: CallbackQuery):
         text = f"📦 <b>Заказы пользователя (ID: {user_id}):</b>\n\n"
         for order in orders:
             order_id, service, price, status, created_at, admin_price, order_code, rating, _, is_urgent = order
-            status_text = "✅ Оплачен" if status == "paid" else "⏳ Ожидает" if status == "pending" else "🔧 В работе" if status == "in_progress" else "❌ Отменён"
+            status_text = {"pending": "⏳ Ожидает оплаты", "paid": "💳 Оплачен", "in_progress": "🔧 В работе", "completed": "✅ Выполнен", "cancelled": "❌ Отменён"}.get(status, status)
             final_price = admin_price if admin_price > 0 else price
             created = datetime.fromisoformat(created_at).strftime("%d.%m.%Y")
             display_code = order_code or f"#{order_id}"
@@ -3403,7 +3533,7 @@ async def cb_order_detail(callback: CallbackQuery):
     user_display = f"@{user[1]}" if user and user[1] else f"ID:{order[1]}"
 
     order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id, is_urgent = order
-    status_text = "✅ Оплачен" if status == "paid" else "⏳ Ожидает оплаты" if status == "pending" else "🔧 В работе" if status == "in_progress" else "❌ Отменён"
+    status_text = {"pending": "⏳ Ожидает оплаты", "paid": "💳 Оплачен", "in_progress": "🔧 В работе", "completed": "✅ Выполнен", "cancelled": "❌ Отменён"}.get(status, status)
     final_price = admin_price if admin_price > 0 else price
     display_code = order_code or f"#{order_id}"
     urgent = "🔥 Срочный заказ!\n" if is_urgent else ""
@@ -3445,8 +3575,8 @@ async def cb_accept_urgent(callback: CallbackQuery):
     if not order:
         await callback.answer("❌ Заказ не найден", show_alert=True)
         return
-    if order[4] != "pending":
-        await callback.answer("❌ Заказ уже обработан", show_alert=True)
+    if order[4] != "paid":
+        await callback.answer("❌ Сначала подтвердите оплату заказа", show_alert=True)
         return
     await run_db(update_order_status, order_id, "in_progress")
     await run_db(add_admin_log, callback.from_user.id, "accept_urgent", f"Принял срочный заказ {order[9]}")
@@ -3489,7 +3619,7 @@ async def cb_reviews_page(callback: CallbackQuery):
 
 
 def _get_review_by_code(order_code: str):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("""
         SELECT o.order_code, o.service, o.rating, o.review, u.username, u.first_name, o.created_at, o.order_id
@@ -3503,7 +3633,7 @@ def _get_review_by_code(order_code: str):
 
 
 def _delete_review_by_code(order_code: str):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("SELECT order_id, service, rating, review FROM orders WHERE order_code = ?", (order_code,))
     row = cur.fetchone()
@@ -3512,7 +3642,7 @@ def _delete_review_by_code(order_code: str):
 
 
 def _reset_review_by_code(order_code: str):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("UPDATE orders SET rating = 0, review = '' WHERE order_code = ?", (order_code,))
     conn.commit()
@@ -3636,7 +3766,7 @@ async def cb_admin_delete_old_process(message: Message, state: FSMContext):
 
 # ===================== АДМИН: ЛОГИ =====================
 def _get_admin_logs(limit: int = 20):
-    conn = sqlite3.connect(DB_NAME)
+    conn = db_connect()
     cur = conn.cursor()
     cur.execute("SELECT admin_id, action, details, timestamp FROM admin_logs ORDER BY timestamp DESC LIMIT ?", (limit,))
     rows = cur.fetchall()
@@ -3672,6 +3802,9 @@ async def cb_set_price_start(callback: CallbackQuery, state: FSMContext):
     order = await run_db(get_order, order_id)
     if not order:
         await callback.answer("❌ Заказ не найден", show_alert=True)
+        return
+    if order[4] not in {"in_progress", "completed"}:
+        await callback.answer("❌ Файл можно прикрепить только к заказу в работе или выполненному", show_alert=True)
         return
     await state.update_data(order_id=order_id)
     await callback.message.edit_text(
@@ -3722,7 +3855,7 @@ async def send_order_detail_message(message: Message, order_id: int):
     user_display = f"@{user[1]}" if user and user[1] else f"ID:{order[1]}"
 
     order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id, is_urgent = order
-    status_text = "✅ Оплачен" if status == "paid" else "⏳ Ожидает оплаты" if status == "pending" else "🔧 В работе" if status == "in_progress" else "❌ Отменён"
+    status_text = {"pending": "⏳ Ожидает оплаты", "paid": "💳 Оплачен", "in_progress": "🔧 В работе", "completed": "✅ Выполнен", "cancelled": "❌ Отменён"}.get(status, status)
     final_price = admin_price if admin_price > 0 else price
     display_code = order_code or f"#{order_id}"
     urgent = "🔥 Срочный заказ!\n" if is_urgent else ""
@@ -3763,8 +3896,8 @@ async def cb_start_work(callback: CallbackQuery):
     if not order:
         await callback.answer("❌ Заказ не найден", show_alert=True)
         return
-    if order[4] != "pending":
-        await callback.answer("❌ Заказ не ожидает оплаты", show_alert=True)
+    if order[4] != "paid":
+        await callback.answer("❌ Начать работу можно только после подтверждения оплаты", show_alert=True)
         return
     order_code = order[9] or f"#{order_id}"
     await run_db(update_order_status, order_id, "in_progress")
@@ -3793,7 +3926,7 @@ async def cb_complete_work(callback: CallbackQuery):
         await callback.answer("❌ Заказ не в работе", show_alert=True)
         return
     order_code = order[9] or f"#{order_id}"
-    await run_db(update_order_status, order_id, "paid")
+    await run_db(update_order_status, order_id, "completed")
     await run_db(add_admin_log, callback.from_user.id, "complete_work", f"Завершил работу над заказом {order_code}")
     await callback.answer("✅ Заказ переведён в статус 'Выполнен'!", show_alert=True)
     try:
@@ -3897,7 +4030,7 @@ async def show_order_detail(target, order_id: int, is_callback: bool = False):
     user_display = f"@{user[1]}" if user and user[1] else f"ID:{order[1]}"
 
     order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id, is_urgent = order
-    status_text = "✅ Оплачен" if status == "paid" else "⏳ Ожидает оплаты" if status == "pending" else "🔧 В работе" if status == "in_progress" else "❌ Отменён"
+    status_text = {"pending": "⏳ Ожидает оплаты", "paid": "💳 Оплачен", "in_progress": "🔧 В работе", "completed": "✅ Выполнен", "cancelled": "❌ Отменён"}.get(status, status)
     final_price = admin_price if admin_price > 0 else price
     display_code = order_code or f"#{order_id}"
     urgent = "🔥 Срочный заказ!\n" if is_urgent else ""
@@ -4007,7 +4140,7 @@ async def cb_review_start(callback: CallbackQuery, state: FSMContext):
     if order[1] != user_id:
         await callback.answer("⛔ Это не ваш заказ", show_alert=True)
         return
-    if order[4] != "paid":
+    if order[4] != "completed":
         await callback.answer("❌ Оставить отзыв можно только для выполненного заказа", show_alert=True)
         return
     if order[10] > 0:
@@ -4028,7 +4161,14 @@ async def cb_review_start(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("rating_"))
 async def cb_review_rating(callback: CallbackQuery, state: FSMContext):
-    rating = int(callback.data.split("_")[1])
+    try:
+        rating = int(callback.data.split("_")[1])
+    except (ValueError, IndexError):
+        await callback.answer("❌ Некорректная оценка", show_alert=True)
+        return
+    if rating not in range(1, 6):
+        await callback.answer("❌ Оценка должна быть от 1 до 5", show_alert=True)
+        return
     await state.update_data(rating=rating)
     await callback.message.edit_text(
         f"⭐ <b>Оставьте отзыв</b>\n\nВы выбрали оценку: <b>{rating}/5</b>\n\nНапишите текст отзыва (или отправьте /skip, чтобы пропустить):",
@@ -4114,7 +4254,7 @@ async def cb_user_order_detail(callback: CallbackQuery):
         await callback.answer("⛔ Это не ваш заказ", show_alert=True)
         return
     order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id, is_urgent = order
-    status_text = "✅ Оплачен" if status == "paid" else "⏳ Ожидает оплаты" if status == "pending" else "🔧 В работе" if status == "in_progress" else "❌ Отменён"
+    status_text = {"pending": "⏳ Ожидает оплаты", "paid": "💳 Оплачен", "in_progress": "🔧 В работе", "completed": "✅ Выполнен", "cancelled": "❌ Отменён"}.get(status, status)
     final_price = admin_price if admin_price > 0 else price
     display_code = order_code or f"#{order_id}"
     urgent = "🔥 Срочный заказ!\n" if is_urgent else ""
@@ -4201,20 +4341,18 @@ async def cb_service_from_db(callback: CallbackQuery, state: FSMContext):
         await callback.answer("❌ Эта услуга временно недоступна", show_alert=True)
         return
 
-    promotions = await run_db(get_active_promotions)
-    promo_discount = 0
-    promo_name = ""
-    for promo in promotions:
-        if promo[3] > promo_discount:
-            promo_discount = promo[3]
-            promo_name = promo[1]
+    promotions = await run_db(get_active_promotions, service_id)
+    promo_discount = promotions[0][3] if promotions else 0
+    promo_name = promotions[0][1] if promotions else ""
 
-    discount, discount_code = await run_db(get_pending_discount, callback.from_user.id)
-    final_discount = max(promo_discount, discount)
-    final_discount_name = discount_code if discount >= promo_discount else promo_name
+    code_discount, discount_code = await run_db(get_pending_discount, callback.from_user.id)
+    final_discount = max(promo_discount, code_discount)
+    final_discount_name = discount_code if code_discount >= promo_discount and code_discount > 0 else promo_name
 
-    await state.update_data(service_id=service_id, service_name=name, service_price=price, discount=final_discount,
-                            discount_name=final_discount_name)
+    await state.update_data(service_id=service_id, service_name=name, service_price=price,
+                            promotion_discount=promo_discount, promotion_name=promo_name,
+                            pending_code_discount=code_discount, pending_discount_code=discount_code,
+                            discount=final_discount, discount_name=final_discount_name)
 
     text = f"""
 <b>📋 Вы выбрали: {escape_html(name)}</b>
@@ -4224,7 +4362,7 @@ async def cb_service_from_db(callback: CallbackQuery, state: FSMContext):
 💰 <b>Цена:</b> {format_price_with_discount(price, final_discount)}
 """
     if final_discount > 0:
-        text += f"\n🎉 <b>Применяется скидка: {final_discount}%</b> (акция: {escape_html(final_discount_name)})"
+        text += f"\n🎉 <b>Применяется скидка: {final_discount}%</b> ({escape_html(final_discount_name)})"
     text += """
 
 📌 <i>Важно! Окончательная цена и сроки зависят от:</i>
@@ -4248,47 +4386,50 @@ async def cb_service_from_db(callback: CallbackQuery, state: FSMContext):
 async def cb_confirm_order_from_db(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     parts = callback.data.split("_")
+    is_urgent = len(parts) >= 4 and parts[2] == "urgent"
+    service_id = int(parts[3] if is_urgent else parts[2])
 
-    is_urgent = 0
-    if len(parts) >= 4 and parts[2] == "urgent":
-        is_urgent = 1
-        service_id = int(parts[3])
-    else:
-        service_id = int(parts[2])
-
-    data = await state.get_data()
-    service_name = data.get("service_name")
-    service_price = data.get("service_price")
-    discount = data.get("discount", 0)
-    discount_name = data.get("discount_name", "")
-
-    if not service_name:
-        await callback.answer("❌ Ошибка: выберите услугу заново", show_alert=True)
+    service = await run_db(get_service, service_id)
+    if not service or not service[4]:
+        await callback.answer("❌ Услуга недоступна. Выберите другую.", show_alert=True)
         await state.clear()
         return
 
-    final_price = max(1, round(service_price * (1 - discount / 100))) if discount > 0 else service_price
-    if discount > 0:
-        await run_db(clear_pending_discount, user_id)
+    _, service_name, _, service_price, _ = service
+    data = await state.get_data()
+    if data.get("service_id") != service_id:
+        await callback.answer("❌ Сессия заказа устарела. Выберите услугу заново.", show_alert=True)
+        await state.clear()
+        return
 
-    order_id, order_code = await run_db(add_order, user_id, service_name, final_price, is_urgent, discount)
+    _, pending_code = await run_db(get_pending_discount, user_id)
+    try:
+        order_id, order_code, final_price, final_discount, discount_name = await run_db(
+            create_order_transaction, user_id, service_id, service_name, service_price, is_urgent, pending_code
+        )
+    except ValueError as exc:
+        await callback.answer(f"❌ {exc}", show_alert=True)
+        await state.clear()
+        return
+    except Exception:
+        logging.exception("Ошибка транзакционного создания заказа")
+        await callback.answer("❌ Не удалось создать заказ. Попробуйте ещё раз.", show_alert=True)
+        await state.clear()
+        return
+
     await run_db(update_user_action, user_id, f"order_{service_name}")
     await run_db(add_user_log, user_id, "create_order",
-                 f"Заказ {order_code}: {service_name} ({final_price}₽) {'СРОЧНЫЙ' if is_urgent else ''} {'СКИДКА ' + str(discount) + '%' if discount else ''}")
-
+                 f"Заказ {order_code}: {service_name} ({final_price}₽) {'СРОЧНЫЙ' if is_urgent else ''} {'СКИДКА ' + str(final_discount) + '%' if final_discount else ''}")
     await state.clear()
 
     user = await run_db(get_user, user_id)
     username = user[1] if user else None
     user_name = user[2] if user else "Пользователь"
-
     urgent_text = "🔥 <b>СРОЧНЫЙ ЗАКАЗ!</b>\n" if is_urgent else ""
-
-    if discount > 0:
-        price_line = f"💰 Стоимость со скидкой: <b>{final_price} руб.</b> (базовая {service_price} руб., скидка <b>{discount}%</b> по акции {escape_html(discount_name)})\n"
+    if final_discount > 0:
+        price_line = f"💰 Стоимость со скидкой: <b>{final_price} руб.</b> (базовая {service_price} руб., скидка <b>{final_discount}%</b> — {escape_html(discount_name)})\n"
     else:
         price_line = f"💰 Стоимость: <b>{final_price} руб.</b>\n"
-
     text = f"""
 <b>✅ Заказ успешно создан!</b>
 
@@ -4305,42 +4446,32 @@ async def cb_confirm_order_from_db(callback: CallbackQuery, state: FSMContext):
 👤 Или с CEO: {CEO_USERNAME}
 
 💬 После согласования всех деталей сообщите диспетчеру код заказа: <b>{escape_html(order_code)}</b>
-
-🔐 <i>Ваш заказ защищён и хранится в децентрализованной системе.</i>
 """
-
     keyboard = InlineKeyboardBuilder()
-    dispatcher_username = DISPATCHER_USERNAME.replace("@", "")
-    ceo_username = CEO_USERNAME.replace("@", "")
-    keyboard.button(text="📞 Связаться с диспетчером", url=f"https://t.me/{dispatcher_username}")
-    keyboard.button(text="👤 Связаться с CEO", url=f"https://t.me/{ceo_username}")
+    keyboard.button(text="📞 Связаться с диспетчером", url=f"https://t.me/{DISPATCHER_USERNAME.replace('@','')}")
+    keyboard.button(text="👤 Связаться с CEO", url=f"https://t.me/{CEO_USERNAME.replace('@','')}")
     keyboard.button(text="📋 Мои заказы", callback_data="my_orders")
     keyboard.button(text="🔙 На главную", callback_data="main_menu")
     keyboard.adjust(1)
-
     await update_message(callback, text, keyboard.as_markup(), "HTML")
     await callback.answer()
 
-    for admin_id in ADMINS:
+    admin_ids = await run_db(get_active_admin_ids)
+    for admin_id in admin_ids:
         try:
-            urgent_marker = "🔥 СРОЧНЫЙ " if is_urgent else ""
-            msg = "🆕 " + urgent_marker + "НОВЫЙ ЗАКАЗ!"
-            msg += "\n📋 Услуга: " + service_name
-            msg += "\n🏷️ Код: " + order_code
-            msg += "\n👤 Пользователь: @" + (username or "без username") + " (" + user_name + ")"
-            msg += "\n💰 Цена: " + str(final_price) + " ₽"
-            if discount > 0:
-                msg += f"\n🎉 Скидка {discount}% по акции {discount_name} (база {service_price}₽)"
-            if is_urgent:
-                msg += "\n🔥 Срочный заказ требует немедленного внимания!"
-            msg += "\n📅 " + datetime.now().strftime('%d.%m.%Y %H:%M')
+            msg = f"🆕 {'🔥 СРОЧНЫЙ ' if is_urgent else ''}НОВЫЙ ЗАКАЗ!"
+            msg += f"\n📋 Услуга: {service_name}\n🏷️ Код: {order_code}"
+            msg += f"\n👤 Пользователь: @{username or 'без username'} ({user_name})"
+            msg += f"\n💰 Цена: {final_price} ₽"
+            if final_discount > 0:
+                msg += f"\n🎉 Скидка {final_discount}%"
+            msg += f"\n📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}"
             await bot.send_message(admin_id, msg)
         except Exception as e:
             logging.error(f"Ошибка отправки уведомления админу {admin_id}: {e}")
 
     if is_urgent:
-        asyncio.create_task(
-            urgent_notification_loop(order_id, order_code, service_name, username, user_name, final_price))
+        asyncio.create_task(urgent_notification_loop(order_id, order_code, service_name, username, user_name, final_price))
 
 
 async def urgent_notification_loop(order_id: int, order_code: str, service_name: str, username: str, user_name: str,
@@ -4355,7 +4486,7 @@ async def urgent_notification_loop(order_id: int, order_code: str, service_name:
         if order[4] != "pending":
             break
         attempts += 1
-        for admin_id in ADMINS:
+        for admin_id in await run_db(get_active_admin_ids):
             try:
                 await bot.send_message(admin_id,
                                        f"🔥 <b>СРОЧНЫЙ ЗАКАЗ ОЖИДАЕТ!</b>\n\n📋 Услуга: {service_name}\n🏷️ Код: {order_code}\n👤 Пользователь: @{username or 'без username'} ({user_name})\n💰 Цена: <b>{price} ₽</b>\n⏰ Заказ ожидает уже <b>{attempts * 2}</b> минут\n\n⚠️ Нажмите на заказ и выберите 'Принять срочный заказ'!",
@@ -4395,7 +4526,7 @@ async def support_send_message(message: Message, state: FSMContext):
     await run_db(add_user_log, user.id, "support_message", f"Отправил сообщение: {(message.text or '')[:50]}")
     text = f"📩 <b>Сообщение от пользователя</b> @{user.username or 'без username'} (ID: {user.id})\n\n{escape_html(message.text or '')}"
     sent_to = 0
-    for admin_id in ADMINS:
+    for admin_id in await run_db(get_active_admin_ids):
         try:
             await bot.send_message(admin_id, text, parse_mode="HTML")
             sent_to += 1
@@ -4435,7 +4566,7 @@ async def cb_my_orders(callback: CallbackQuery):
     text = "<b>📋 Ваши заказы:</b>\n\n"
     for order in orders:
         order_id, service, price, status, created_at, admin_price, order_code, rating, _, is_urgent = order
-        status_text = {"pending": "⏳ Ожидает оплаты", "paid": "✅ Оплачен", "in_progress": "🔧 В работе",
+        status_text = {"pending": "⏳ Ожидает оплаты", "paid": "💳 Оплачен", "in_progress": "🔧 В работе", "completed": "✅ Выполнен",
                        "cancelled": "❌ Отменён"}.get(status, status)
         final_price = admin_price if admin_price > 0 else price
         created = datetime.fromisoformat(created_at).strftime("%d.%m.%Y")
@@ -4447,7 +4578,7 @@ async def cb_my_orders(callback: CallbackQuery):
     for order in orders:
         order_id, service, price, status, created_at, admin_price, order_code, rating, _, is_urgent = order
         display_code = order_code or f"#{order_id}"
-        status_emoji = "✅" if status == "paid" else "⏳" if status == "pending" else "🔧" if status == "in_progress" else "❌"
+        status_emoji = "⏳" if status == "pending" else "💳" if status == "paid" else "🔧" if status == "in_progress" else "✅" if status == "completed" else "❌"
         urgent = "🔥" if is_urgent else ""
         builder.button(text=f"{status_emoji}{urgent} {escape_html(display_code)} - {escape_html(service[:15])}",
                        callback_data=f"my_order_{order_id}")
@@ -4489,6 +4620,7 @@ async def cb_admin_menu(callback: CallbackQuery):
 ✅ Оплаченных: {stats['paid_orders']}
 ⏳ Ожидают оплаты: {stats['pending_orders']}
 🔧 В работе: {stats['in_progress']}
+✅ Выполнено: {stats['completed_orders']}
 ❌ Отменённых: {stats['cancelled_orders']}
 💰 Доход: {stats['income']} руб.
 ⭐ Средняя оценка: {stats['avg_rating']}
@@ -4631,7 +4763,7 @@ async def cb_admin_export_orders(callback: CallbackQuery):
         file_name = f"заказы_{datetime.now().strftime('%d.%m.%Y')}.xlsx"
         await callback.message.answer_document(
             document=BufferedInputFile(excel_file.getvalue(), filename=file_name),
-            caption=f"📊 <b>Отчёт по заказам</b>\n\n📅 Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n📦 Всего заказов: экспортировано\n\n🔐 Данные защищены и хранятся в децентрализованной системе.",
+            caption=f"📊 <b>Отчёт по заказам</b>\n\n📅 Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n📦 Всего заказов: экспортировано\n\n🔐 Доступ к данным отчёта ограничен администраторами сервиса.",
             parse_mode="HTML"
         )
         await update_message(callback, "✅ Отчёт успешно сформирован и отправлен!", admin_menu_keyboard(), "HTML")
@@ -4656,509 +4788,3 @@ async def main():
 # ===================== ДОБАВЛЯЕМ ОТСУТСТВУЮЩИЕ СОСТОЯНИЯ =====================
 # Эти классы должны быть добавлены в раздел States
 
-class AdminRemoveState(StatesGroup):
-    waiting_for_user_id = State()
-
-class AdminActivateState(StatesGroup):
-    waiting_for_promo_id = State()
-
-class AdminDeactivateState(StatesGroup):
-    waiting_for_promo_id = State()
-
-class AdminDeletePromoState(StatesGroup):
-    waiting_for_promo_id = State()
-
-class AdminAddState(StatesGroup):
-    waiting_for_user_id = State()
-
-
-# ===================== ИСПРАВЛЕННЫЕ ОБРАБОТЧИКИ =====================
-
-# ===================== АДМИН: УПРАВЛЕНИЕ АДМИНАМИ (ИСПРАВЛЕННЫЙ) =====================
-
-@dp.callback_query(F.data == "admin_add")
-async def cb_admin_add(callback: CallbackQuery, state: FSMContext):
-    if not is_super_admin(callback.from_user.id):
-        await callback.answer("⛔ Только супер-админ может добавлять", show_alert=True)
-        return
-
-    text = """
-👑 <b>Добавление администратора</b>
-
-Введите ID пользователя или @username:
-
-Примеры:
-<code>123456789</code>
-<code>@username</code>
-<code>t.me/username</code>
-
-ℹ️ Пользователь должен хотя бы раз написать боту /start
-"""
-    await callback.message.edit_text(text, reply_markup=back_to_admin_keyboard(), parse_mode="HTML")
-    await state.set_state("waiting_for_admin_id")  # Временно используем строку
-    await callback.answer()
-
-
-@dp.message(StateFilter("waiting_for_admin_id"))
-async def process_admin_add_by_id(message: Message, state: FSMContext):
-    if not is_super_admin(message.from_user.id):
-        await message.answer("⛔ Нет доступа.", parse_mode="HTML")
-        await state.clear()
-        return
-
-    text = message.text.strip()
-    user_id = None
-
-    # Если просто число
-    if text.isdigit():
-        user_id = int(text)
-
-    # Если ссылка t.me/username
-    elif "t.me/" in text:
-        username = text.split("t.me/")[-1].replace("/", "").strip()
-        username = username.replace("@", "")
-        conn = sqlite3.connect(DB_NAME)
-        cur = conn.cursor()
-        cur.execute("SELECT user_id FROM users WHERE username = ?", (username,))
-        row = cur.fetchone()
-        conn.close()
-        if row:
-            user_id = row[0]
-
-    # Если просто @username
-    elif text.startswith("@"):
-        username = text.replace("@", "")
-        conn = sqlite3.connect(DB_NAME)
-        cur = conn.cursor()
-        cur.execute("SELECT user_id FROM users WHERE username = ?", (username,))
-        row = cur.fetchone()
-        conn.close()
-        if row:
-            user_id = row[0]
-
-    if not user_id:
-        await message.answer(
-            "❌ Не удалось определить ID пользователя.\n\n"
-            "Попробуйте:\n"
-            "1. Отправить ID (число)\n"
-            "2. Отправить ссылку t.me/username\n"
-            "3. Отправить @username\n\n"
-            "Или попросите пользователя написать боту команду /start.",
-            parse_mode="HTML"
-        )
-        return
-
-    if await run_db(is_admin_db, user_id):
-        await message.answer("❌ Этот пользователь уже является админом.", parse_mode="HTML")
-        await state.clear()
-        return
-
-    user = await run_db(get_user_by_id, user_id)
-    username = user[1] if user else None
-    first_name = user[2] if user else None
-
-    await run_db(add_admin, user_id, username, first_name, message.from_user.id)
-    await run_db(add_admin_log, message.from_user.id, "add_admin", f"Добавил админа {user_id}")
-
-    await message.answer(
-        f"✅ Администратор <b>{username or first_name or str(user_id)}</b> успешно добавлен!\n\n"
-        f"📌 Теперь он может использовать /admin",
-        reply_markup=admin_menu_keyboard(),
-        parse_mode="HTML"
-    )
-    await state.clear()
-
-@dp.message(AdminAddState.waiting_for_user_id)
-async def process_admin_add_by_id(message: Message, state: FSMContext):
-    if not is_super_admin(message.from_user.id):
-        await message.answer("⛔ Нет доступа.", parse_mode="HTML")
-        await state.clear()
-        return
-
-    text = message.text.strip()
-    user_id = None
-
-    # Если просто число
-    if text.isdigit():
-        user_id = int(text)
-
-    # Если ссылка t.me/username
-    elif "t.me/" in text:
-        username = text.split("t.me/")[-1].replace("/", "").strip()
-        username = username.replace("@", "")
-        conn = sqlite3.connect(DB_NAME)
-        cur = conn.cursor()
-        cur.execute("SELECT user_id FROM users WHERE username = ?", (username,))
-        row = cur.fetchone()
-        conn.close()
-        if row:
-            user_id = row[0]
-
-    # Если просто @username
-    elif text.startswith("@"):
-        username = text.replace("@", "")
-        conn = sqlite3.connect(DB_NAME)
-        cur = conn.cursor()
-        cur.execute("SELECT user_id FROM users WHERE username = ?", (username,))
-        row = cur.fetchone()
-        conn.close()
-        if row:
-            user_id = row[0]
-
-    if not user_id:
-        await message.answer(
-            "❌ Не удалось определить ID пользователя.\n\n"
-            "Попробуйте:\n"
-            "1. Отправить ID (число)\n"
-            "2. Отправить ссылку t.me/username\n"
-            "3. Отправить @username\n\n"
-            "Или попросите пользователя написать боту команду /start.",
-            parse_mode="HTML"
-        )
-        return
-
-    if await run_db(is_admin_db, user_id):
-        await message.answer("❌ Этот пользователь уже является админом.", parse_mode="HTML")
-        await state.clear()
-        return
-
-    user = await run_db(get_user_by_id, user_id)
-    username = user[1] if user else None
-    first_name = user[2] if user else None
-
-    await run_db(add_admin, user_id, username, first_name, message.from_user.id)
-    await run_db(add_admin_log, message.from_user.id, "add_admin", f"Добавил админа {user_id}")
-
-    await message.answer(
-        f"✅ Администратор <b>{username or first_name or str(user_id)}</b> успешно добавлен!\n\n"
-        f"📌 Теперь он может использовать /admin",
-        reply_markup=admin_menu_keyboard(),
-        parse_mode="HTML"
-    )
-    await state.clear()
-
-
-@dp.callback_query(F.data == "admin_remove")
-async def cb_admin_remove(callback: CallbackQuery, state: FSMContext):
-    if not is_super_admin(callback.from_user.id):
-        await callback.answer("⛔ Только супер-админ может удалять", show_alert=True)
-        return
-
-    text = """
-👑 <b>Удаление администратора</b>
-
-Введите ID пользователя, которого хотите удалить:
-
-Пример: <code>123456789</code>
-
-(Список админов можно посмотреть командой /admins)
-"""
-    await callback.message.edit_text(text, reply_markup=back_to_admin_keyboard(), parse_mode="HTML")
-    await state.set_state("waiting_for_remove_admin_id")
-    await callback.answer()
-
-
-@dp.message(StateFilter("waiting_for_remove_admin_id"))
-async def process_admin_remove_by_id(message: Message, state: FSMContext):
-    if not is_super_admin(message.from_user.id):
-        await message.answer("⛔ Нет доступа.", parse_mode="HTML")
-        await state.clear()
-        return
-
-    try:
-        user_id = int(message.text.strip())
-    except ValueError:
-        await message.answer("❌ Введите корректный ID (только число).", parse_mode="HTML")
-        return
-
-    if user_id == message.from_user.id:
-        await message.answer("❌ Нельзя удалить самого себя.", parse_mode="HTML")
-        await state.clear()
-        return
-
-    admin = await run_db(get_admin, user_id)
-    if not admin:
-        await message.answer(f"❌ Администратор с ID {user_id} не найден.", parse_mode="HTML")
-        await state.clear()
-        return
-
-    if admin[3] == "super_admin":
-        await message.answer("❌ Нельзя удалить супер-админа.", parse_mode="HTML")
-        await state.clear()
-        return
-
-    await run_db(remove_admin, user_id)
-    await run_db(add_admin_log, message.from_user.id, "remove_admin", f"Удалил админа {user_id}")
-
-    await message.answer(
-        f"✅ Администратор <b>{admin[1] or admin[2] or str(user_id)}</b> успешно удалён!",
-        reply_markup=admin_menu_keyboard(),
-        parse_mode="HTML"
-    )
-    await state.clear()
-
-
-@dp.message(AdminRemoveState.waiting_for_user_id)
-async def process_admin_remove_by_id(message: Message, state: FSMContext):
-    if not is_super_admin(message.from_user.id):
-        await message.answer("⛔ Нет доступа.", parse_mode="HTML")
-        await state.clear()
-        return
-
-    try:
-        user_id = int(message.text.strip())
-    except ValueError:
-        await message.answer("❌ Введите корректный ID (только число).", parse_mode="HTML")
-        return
-
-    if user_id == message.from_user.id:
-        await message.answer("❌ Нельзя удалить самого себя.", parse_mode="HTML")
-        await state.clear()
-        return
-
-    admin = await run_db(get_admin, user_id)
-    if not admin:
-        await message.answer(f"❌ Администратор с ID {user_id} не найден.", parse_mode="HTML")
-        await state.clear()
-        return
-
-    if admin[3] == "super_admin":
-        await message.answer("❌ Нельзя удалить супер-админа.", parse_mode="HTML")
-        await state.clear()
-        return
-
-    await run_db(remove_admin, user_id)
-    await run_db(add_admin_log, message.from_user.id, "remove_admin", f"Удалил админа {user_id}")
-
-    await message.answer(
-        f"✅ Администратор <b>{admin[1] or admin[2] or str(user_id)}</b> успешно удалён!",
-        reply_markup=admin_menu_keyboard(),
-        parse_mode="HTML"
-    )
-    await state.clear()
-
-
-# ---- ИСПРАВЛЕННЫЕ ОБРАБОТЧИКИ ДЛЯ АКЦИЙ ----
-@dp.callback_query(F.data == "promotion_activate")
-async def cb_promotion_activate(callback: CallbackQuery, state: FSMContext):
-    if not is_super_admin(callback.from_user.id):
-        await callback.answer("⛔ Только супер-админ имеет доступ", show_alert=True)
-        return
-    await callback.message.edit_text(
-        "🔄 <b>Активация акции</b>\n\n"
-        "Введите ID акции, которую хотите активировать.\n\n"
-        "Чтобы узнать ID, посмотрите список акций выше.\n\n"
-        "Пример: 1",
-        reply_markup=back_to_admin_keyboard(),
-        parse_mode="HTML"
-    )
-    await state.set_state(AdminActivateState.waiting_for_promo_id)
-    await callback.answer()
-
-
-@dp.message(AdminActivateState.waiting_for_promo_id)
-async def process_promotion_activate(message: Message, state: FSMContext):
-    if not is_super_admin(message.from_user.id):
-        await message.answer("⛔ Нет доступа.", parse_mode="HTML")
-        await state.clear()
-        return
-
-    try:
-        promo_id = int(message.text.strip())
-    except ValueError:
-        await message.answer("❌ Введите корректный ID (только число).", parse_mode="HTML")
-        return
-
-    promo = await run_db(get_promotion_by_id, promo_id)
-    if not promo:
-        await message.answer(f"❌ Акция с ID {promo_id} не найдена.", parse_mode="HTML")
-        await state.clear()
-        return
-
-    await run_db(activate_promotion, promo_id)
-    await run_db(add_admin_log, message.from_user.id, "activate_promotion", f"Активировал акцию {promo[1]}")
-
-    await message.answer(
-        f"✅ Акция <b>{escape_html(promo[1])}</b> успешно активирована!",
-        reply_markup=admin_menu_keyboard(),
-        parse_mode="HTML"
-    )
-    await state.clear()
-
-
-@dp.callback_query(F.data == "promotion_deactivate")
-async def cb_promotion_deactivate(callback: CallbackQuery, state: FSMContext):
-    if not is_super_admin(callback.from_user.id):
-        await callback.answer("⛔ Только супер-админ имеет доступ", show_alert=True)
-        return
-    await callback.message.edit_text(
-        "⏹️ <b>Деактивация акции</b>\n\n"
-        "Введите ID акции, которую хотите деактивировать.\n\n"
-        "Чтобы узнать ID, посмотрите список акций выше.\n\n"
-        "Пример: 1",
-        reply_markup=back_to_admin_keyboard(),
-        parse_mode="HTML"
-    )
-    await state.set_state(AdminDeactivateState.waiting_for_promo_id)
-    await callback.answer()
-
-
-@dp.message(AdminDeactivateState.waiting_for_promo_id)
-async def process_promotion_deactivate(message: Message, state: FSMContext):
-    if not is_super_admin(message.from_user.id):
-        await message.answer("⛔ Нет доступа.", parse_mode="HTML")
-        await state.clear()
-        return
-
-    try:
-        promo_id = int(message.text.strip())
-    except ValueError:
-        await message.answer("❌ Введите корректный ID (только число).", parse_mode="HTML")
-        return
-
-    promo = await run_db(get_promotion_by_id, promo_id)
-    if not promo:
-        await message.answer(f"❌ Акция с ID {promo_id} не найдена.", parse_mode="HTML")
-        await state.clear()
-        return
-
-    await run_db(deactivate_promotion, promo_id)
-    await run_db(add_admin_log, message.from_user.id, "deactivate_promotion", f"Деактивировал акцию {promo[1]}")
-
-    await message.answer(
-        f"✅ Акция <b>{escape_html(promo[1])}</b> успешно деактивирована!",
-        reply_markup=admin_menu_keyboard(),
-        parse_mode="HTML"
-    )
-    await state.clear()
-
-
-@dp.callback_query(F.data == "promotion_delete")
-async def cb_promotion_delete(callback: CallbackQuery, state: FSMContext):
-    if not is_super_admin(callback.from_user.id):
-        await callback.answer("⛔ Только супер-админ имеет доступ", show_alert=True)
-        return
-    await callback.message.edit_text(
-        "🗑️ <b>Удаление акции</b>\n\n"
-        "Введите ID акции, которую хотите удалить.\n\n"
-        "Чтобы узнать ID, посмотрите список акций выше.\n\n"
-        "Пример: 1\n\n"
-        "⚠️ Это действие невозможно отменить!",
-        reply_markup=back_to_admin_keyboard(),
-        parse_mode="HTML"
-    )
-    await state.set_state(AdminDeletePromoState.waiting_for_promo_id)
-    await callback.answer()
-
-
-@dp.message(AdminDeletePromoState.waiting_for_promo_id)
-async def process_promotion_delete(message: Message, state: FSMContext):
-    if not is_super_admin(message.from_user.id):
-        await message.answer("⛔ Нет доступа.", parse_mode="HTML")
-        await state.clear()
-        return
-
-    try:
-        promo_id = int(message.text.strip())
-    except ValueError:
-        await message.answer("❌ Введите корректный ID (только число).", parse_mode="HTML")
-        return
-
-    promo = await run_db(get_promotion_by_id, promo_id)
-    if not promo:
-        await message.answer(f"❌ Акция с ID {promo_id} не найдена.", parse_mode="HTML")
-        await state.clear()
-        return
-
-    await run_db(delete_promotion, promo_id)
-    await run_db(add_admin_log, message.from_user.id, "delete_promotion", f"Удалил акцию {promo[1]}")
-
-    await message.answer(
-        f"✅ Акция <b>{escape_html(promo[1])}</b> успешно удалена!",
-        reply_markup=admin_menu_keyboard(),
-        parse_mode="HTML"
-    )
-    await state.clear()
-
-
-# ===================== ИСПРАВЛЕННЫЙ ЧАТ =====================
-# Добавьте этот класс в раздел States (в начале файла):
-# class ChatState(StatesGroup):
-#     sending = State()
-
-
-@dp.callback_query(F.data.startswith("chat_open_"))
-async def cb_chat_open(callback: CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("⛔ Нет доступа", show_alert=True)
-        return
-
-    user_id = int(callback.data.split("_")[2])
-    user = await run_db(get_user_by_id, user_id)
-    name = user[1] or user[2] or str(user_id)
-
-    await run_db(mark_as_read, user_id, callback.from_user.id)
-
-    history = await run_db(get_chat_history, user_id)
-
-    text = f"💬 <b>Чат с {escape_html(name)}</b>\n\n"
-
-    if history:
-        for msg_id, msg, is_from_admin, created_at in history[-20:]:
-            time = datetime.fromisoformat(created_at).strftime("%H:%M")
-            sender = "👤 Админ" if is_from_admin else "👤 Клиент"
-            text += f"{sender} [{time}]: {escape_html(msg)}\n"
-    else:
-        text += "История сообщений пуста.\n"
-
-    text += "\n✏️ Напишите сообщение:"
-
-    keyboard = InlineKeyboardBuilder()
-    keyboard.button(text="❌ Закрыть чат", callback_data=f"chat_close_{user_id}")
-    keyboard.button(text="🔙 Назад", callback_data="admin_chats")
-    keyboard.adjust(1)
-
-    await update_message(callback, text, keyboard.as_markup(), "HTML")
-
-    await state.set_state(ChatState.sending)
-    await state.update_data(chat_user_id=user_id)
-
-    await callback.answer()
-
-
-@dp.message(ChatState.sending)
-async def chat_send_message(message: Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        await message.answer("⛔ Нет доступа", parse_mode="HTML")
-        await state.clear()
-        return
-
-    data = await state.get_data()
-    user_id = data.get("chat_user_id")
-
-    if not user_id:
-        await message.answer("❌ Чат не найден.", parse_mode="HTML")
-        await state.clear()
-        return
-
-    if message.text and message.text.startswith("/"):
-        return
-
-    await run_db(send_message, user_id, message.from_user.id, message.text, 1)
-    await run_db(add_admin_log, message.from_user.id, "chat_message", f"Отправил сообщение пользователю {user_id}: {message.text[:50]}...")
-
-    try:
-        await bot.send_message(
-            user_id,
-            f"📩 <b>Сообщение от администратора</b>\n\n{escape_html(message.text)}\n\n✏️ Вы можете ответить в этом чате.",
-            parse_mode="HTML"
-        )
-        await message.answer("✅ Сообщение отправлено!", parse_mode="HTML")
-    except Exception as e:
-        logging.error(f"Ошибка отправки сообщения пользователю {user_id}: {e}")
-        await message.answer("❌ Не удалось отправить сообщение пользователю.", parse_mode="HTML")
-
-    await state.clear()
-
-if __name__ == "__main__":
-    asyncio.run(main())
