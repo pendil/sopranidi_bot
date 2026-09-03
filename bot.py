@@ -2806,8 +2806,16 @@ async def process_service_edit_name(message: Message, state: FSMContext):
         await message.answer("⛔ Нет доступа.", parse_mode="HTML")
         await state.clear()
         return
-    if message.text.strip() != "/skip":
-        await state.update_data(new_name=message.text.strip())
+
+    # Если /skip — пропускаем
+    if message.text and message.text.strip() == "/skip":
+        await state.update_data(new_name=None)
+        await message.answer("✅ Название оставлено прежним. Введите новое описание (или /skip):", parse_mode="HTML")
+        await state.set_state(AdminServiceEditState.waiting_for_description)
+        return
+
+    # Иначе сохраняем новое название
+    await state.update_data(new_name=message.text.strip())
     await message.answer("📝 Введите новое описание (или /skip, чтобы оставить прежним):", parse_mode="HTML")
     await state.set_state(AdminServiceEditState.waiting_for_description)
 
