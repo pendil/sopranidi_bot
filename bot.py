@@ -2154,29 +2154,6 @@ async def cb_admin_admins(callback: CallbackQuery):
     await update_message(callback, text, keyboard.as_markup(), "HTML")
     await callback.answer()
 
-@dp.callback_query(F.data == "admin_add")
-async def cb_admin_add(callback: CallbackQuery):
-    if not is_super_admin(callback.from_user.id):
-        await callback.answer("⛔ Только супер-админ может добавлять", show_alert=True)
-        return
-
-    text = """
-👑 <b>Добавление администратора</b>
-
-Используйте команду в чате:
-
-<code>/addadmin ID_пользователя</code>
-
-Примеры:
-<code>/addadmin 123456789</code>
-<code>/addadmin @username</code>
-<code>/addadmin t.me/username</code>
-
-ℹ️ Пользователь должен хотя бы раз написать боту /start
-"""
-    await callback.message.edit_text(text, reply_markup=back_to_admin_keyboard(), parse_mode="HTML")
-    await callback.answer()
-
 
 @dp.message(StateFilter("waiting_for_admin_id"))
 async def process_admin_add(message: Message, state: FSMContext):
@@ -2342,29 +2319,6 @@ async def cmd_forceadmin(message: Message):
         await message.answer(f"✅ Администратор {user_id} УСПЕШНО ДОБАВЛЕН!\n\nПроверьте: /admins")
     else:
         await message.answer(f"❌ Не удалось добавить админа {user_id}.")
-
-@dp.callback_query(F.data == "admin_remove")
-async def cb_admin_remove(callback: CallbackQuery, state: FSMContext):
-    if not is_super_admin(callback.from_user.id):
-        await callback.answer("⛔ Только супер-админ может удалять", show_alert=True)
-        return
-
-    admins = await run_db(get_all_admins)
-    text = "👑 <b>Выберите админа для удаления:</b>\n\n"
-
-    keyboard = InlineKeyboardBuilder()
-    for admin in admins:
-        user_id, username, first_name, role, _ = admin
-        if role == "super_admin":
-            continue
-        name = username or first_name or str(user_id)
-        keyboard.button(text=f"🗑️ {name}", callback_data=f"admin_remove_{user_id}")
-
-    keyboard.button(text="🔙 Назад", callback_data="admin_admins")
-    keyboard.adjust(1)
-
-    await update_message(callback, text, keyboard.as_markup(), "HTML")
-    await callback.answer()
 
 
 @dp.callback_query(F.data.startswith("admin_remove_"))
@@ -3185,11 +3139,12 @@ async def cb_poll_results(callback: CallbackQuery):
     await callback.answer()
 
 
-# ===================== АДМИН: УПРАВЛЕНИЕ ПРОМОКОДАМИ =====================
+# ===================== АДМИН: УПРАВЛЕНИЕ ПРОМОКОДАМИ (ИСПРАВЛЕННЫЙ) =====================
+
 @dp.callback_query(F.data == "admin_promocodes")
 async def cb_admin_promocodes(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("⛔ Нет доступа", show_alert=True)
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer("⛔ Только супер-админ имеет доступ", show_alert=True)
         return
     promocodes = await run_db(get_all_promocodes)
     await run_db(add_admin_log, callback.from_user.id, "view_promocodes", "Просмотрел список промокодов")
@@ -3209,22 +3164,21 @@ async def cb_admin_promocodes(callback: CallbackQuery):
     await callback.answer()
 
 
-@dp.callback_query(F.data == "promocode_create")
-async def cb_promocode_create(callback: CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("⛔ Нет доступа", show_alert=True)
-        return
-    await callback.message.edit_text(
-        "🏷️ <b>Создание промокода</b>\n\nВведите размер скидки в % (только число, например, 15):",
-        reply_markup=back_to_admin_keyboard(),
-        parse_mode="HTML"
-    )
-    await state.set_state(AdminPromocodeCreateState.waiting_for_discount)
-    await callback.answer()
+
 
 
 @dp.message(AdminPromocodeCreateState.waiting_for_discount)
 async def process_promo_discount(message: Message, state: FSMContext):
+    if not is_super_admin(message.from_user.id):
+        await message.answer("⛔ Нет доступа.", parse_mode="HTML")
+        await state.clear()
+        return
+
+    # Проверяем, не является ли сообщение командой отмены
+    if message.text and message.text.startswith("/"):
+        await state.clear()
+        return
+
     try:
         discount = int(message.text.strip())
         if discount <= 0 or discount > 100:
@@ -3240,6 +3194,15 @@ async def process_promo_discount(message: Message, state: FSMContext):
 
 @dp.message(AdminPromocodeCreateState.waiting_for_valid_until)
 async def process_promo_valid_until(message: Message, state: FSMContext):
+    if not is_super_admin(message.from_user.id):
+        await message.answer("⛔ Нет доступа.", parse_mode="HTML")
+        await state.clear()
+        return
+
+    if message.text and message.text.startswith("/"):
+        await state.clear()
+        return
+
     try:
         valid_until = datetime.strptime(message.text.strip(), "%d.%m.%Y")
         if valid_until < datetime.now():
@@ -3254,6 +3217,15 @@ async def process_promo_valid_until(message: Message, state: FSMContext):
 
 @dp.message(AdminPromocodeCreateState.waiting_for_max_uses)
 async def process_promo_max_uses(message: Message, state: FSMContext):
+    if not is_super_admin(message.from_user.id):
+        await message.answer("⛔ Нет доступа.", parse_mode="HTML")
+        await state.clear()
+        return
+
+    if message.text and message.text.startswith("/"):
+        await state.clear()
+        return
+
     try:
         max_uses = int(message.text.strip())
         if max_uses <= 0:
@@ -3274,6 +3246,19 @@ async def process_promo_max_uses(message: Message, state: FSMContext):
         await state.clear()
     except ValueError:
         await message.answer("❌ Введите корректное число. Попробуйте снова:", parse_mode="HTML")
+
+@dp.callback_query(F.data == "promocode_create")
+async def cb_promocode_create(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    await callback.message.edit_text(
+        "🏷️ <b>Создание промокода</b>\n\nВведите размер скидки в % (только число, например, 15):",
+        reply_markup=back_to_admin_keyboard(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AdminPromocodeCreateState.waiting_for_discount)
+    await callback.answer()
 
 
 # ===================== АДМИН: ПОЛЬЗОВАТЕЛИ =====================
@@ -4689,7 +4674,8 @@ class AdminAddState(StatesGroup):
 
 # ===================== ИСПРАВЛЕННЫЕ ОБРАБОТЧИКИ =====================
 
-# ---- ИСПРАВЛЕННЫЙ ОБРАБОТЧИК ДЛЯ ДОБАВЛЕНИЯ АДМИНА ----
+# ===================== АДМИН: УПРАВЛЕНИЕ АДМИНАМИ (ИСПРАВЛЕННЫЙ) =====================
+
 @dp.callback_query(F.data == "admin_add")
 async def cb_admin_add(callback: CallbackQuery, state: FSMContext):
     if not is_super_admin(callback.from_user.id):
@@ -4709,9 +4695,78 @@ async def cb_admin_add(callback: CallbackQuery, state: FSMContext):
 ℹ️ Пользователь должен хотя бы раз написать боту /start
 """
     await callback.message.edit_text(text, reply_markup=back_to_admin_keyboard(), parse_mode="HTML")
-    await state.set_state(AdminAddState.waiting_for_user_id)
+    await state.set_state("waiting_for_admin_id")  # Временно используем строку
     await callback.answer()
 
+
+@dp.message(StateFilter("waiting_for_admin_id"))
+async def process_admin_add_by_id(message: Message, state: FSMContext):
+    if not is_super_admin(message.from_user.id):
+        await message.answer("⛔ Нет доступа.", parse_mode="HTML")
+        await state.clear()
+        return
+
+    text = message.text.strip()
+    user_id = None
+
+    # Если просто число
+    if text.isdigit():
+        user_id = int(text)
+
+    # Если ссылка t.me/username
+    elif "t.me/" in text:
+        username = text.split("t.me/")[-1].replace("/", "").strip()
+        username = username.replace("@", "")
+        conn = sqlite3.connect(DB_NAME)
+        cur = conn.cursor()
+        cur.execute("SELECT user_id FROM users WHERE username = ?", (username,))
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            user_id = row[0]
+
+    # Если просто @username
+    elif text.startswith("@"):
+        username = text.replace("@", "")
+        conn = sqlite3.connect(DB_NAME)
+        cur = conn.cursor()
+        cur.execute("SELECT user_id FROM users WHERE username = ?", (username,))
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            user_id = row[0]
+
+    if not user_id:
+        await message.answer(
+            "❌ Не удалось определить ID пользователя.\n\n"
+            "Попробуйте:\n"
+            "1. Отправить ID (число)\n"
+            "2. Отправить ссылку t.me/username\n"
+            "3. Отправить @username\n\n"
+            "Или попросите пользователя написать боту команду /start.",
+            parse_mode="HTML"
+        )
+        return
+
+    if await run_db(is_admin_db, user_id):
+        await message.answer("❌ Этот пользователь уже является админом.", parse_mode="HTML")
+        await state.clear()
+        return
+
+    user = await run_db(get_user_by_id, user_id)
+    username = user[1] if user else None
+    first_name = user[2] if user else None
+
+    await run_db(add_admin, user_id, username, first_name, message.from_user.id)
+    await run_db(add_admin_log, message.from_user.id, "add_admin", f"Добавил админа {user_id}")
+
+    await message.answer(
+        f"✅ Администратор <b>{username or first_name or str(user_id)}</b> успешно добавлен!\n\n"
+        f"📌 Теперь он может использовать /admin",
+        reply_markup=admin_menu_keyboard(),
+        parse_mode="HTML"
+    )
+    await state.clear()
 
 @dp.message(AdminAddState.waiting_for_user_id)
 async def process_admin_add_by_id(message: Message, state: FSMContext):
@@ -4783,7 +4838,6 @@ async def process_admin_add_by_id(message: Message, state: FSMContext):
     await state.clear()
 
 
-# ---- ИСПРАВЛЕННЫЙ ОБРАБОТЧИК ДЛЯ УДАЛЕНИЯ АДМИНА ----
 @dp.callback_query(F.data == "admin_remove")
 async def cb_admin_remove(callback: CallbackQuery, state: FSMContext):
     if not is_super_admin(callback.from_user.id):
@@ -4800,8 +4854,48 @@ async def cb_admin_remove(callback: CallbackQuery, state: FSMContext):
 (Список админов можно посмотреть командой /admins)
 """
     await callback.message.edit_text(text, reply_markup=back_to_admin_keyboard(), parse_mode="HTML")
-    await state.set_state(AdminRemoveState.waiting_for_user_id)
+    await state.set_state("waiting_for_remove_admin_id")
     await callback.answer()
+
+
+@dp.message(StateFilter("waiting_for_remove_admin_id"))
+async def process_admin_remove_by_id(message: Message, state: FSMContext):
+    if not is_super_admin(message.from_user.id):
+        await message.answer("⛔ Нет доступа.", parse_mode="HTML")
+        await state.clear()
+        return
+
+    try:
+        user_id = int(message.text.strip())
+    except ValueError:
+        await message.answer("❌ Введите корректный ID (только число).", parse_mode="HTML")
+        return
+
+    if user_id == message.from_user.id:
+        await message.answer("❌ Нельзя удалить самого себя.", parse_mode="HTML")
+        await state.clear()
+        return
+
+    admin = await run_db(get_admin, user_id)
+    if not admin:
+        await message.answer(f"❌ Администратор с ID {user_id} не найден.", parse_mode="HTML")
+        await state.clear()
+        return
+
+    if admin[3] == "super_admin":
+        await message.answer("❌ Нельзя удалить супер-админа.", parse_mode="HTML")
+        await state.clear()
+        return
+
+    await run_db(remove_admin, user_id)
+    await run_db(add_admin_log, message.from_user.id, "remove_admin", f"Удалил админа {user_id}")
+
+    await message.answer(
+        f"✅ Администратор <b>{admin[1] or admin[2] or str(user_id)}</b> успешно удалён!",
+        reply_markup=admin_menu_keyboard(),
+        parse_mode="HTML"
+    )
+    await state.clear()
 
 
 @dp.message(AdminRemoveState.waiting_for_user_id)
