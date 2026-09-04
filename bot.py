@@ -1848,61 +1848,6 @@ async def cmd_broadcast(message: Message, state: FSMContext):
                          parse_mode="HTML")
 
 
-# ===================== ГЛОБАЛЬНЫЙ ОБРАБОТЧИК СООБЩЕНИЙ =====================
-@dp.message()
-async def handle_all_messages(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-
-    # Получаем текущее состояние
-    current_state = await state.get_state()
-
-    # ===== ЕСЛИ ЕСТЬ АКТИВНОЕ СОСТОЯНИЕ — ПРОПУСКАЕМ =====
-    if current_state is not None:
-        # Состояния обрабатываются своими обработчиками
-        # НЕ возвращаемся, чтобы не блокировать другие обработчики
-        return
-
-    if await run_db(is_admin_db, user_id):
-        return
-
-    if message.text and message.text.startswith("/"):
-        return
-
-    if not message.text:
-        await message.answer(
-            "📎 Я принимаю только текстовые сообщения.\n"
-            "Для отправки файлов используйте кнопку '📎 Прикрепить файл' в админ-панели.",
-            parse_mode="HTML"
-        )
-        return
-
-    await run_db(send_message, user_id, None, message.text, 0)
-    await run_db(add_user_log, user_id, "chat_message", f"Отправил сообщение: {message.text[:50]}...")
-
-    admins = await run_db(get_all_admins)
-    user = await run_db(get_user, user_id)
-    name = user[1] or user[2] or str(user_id)
-
-    for admin in admins:
-        try:
-            await bot.send_message(
-                admin[0],
-                f"📩 <b>Новое сообщение от клиента!</b>\n\n"
-                f"👤 {escape_html(name)}\n"
-                f"🆔 ID: {user_id}\n"
-                f"💬 {escape_html(message.text)}\n\n"
-                f"🔹 Нажмите <b>💬 Чаты с клиентами</b> в админ-панели, чтобы ответить.",
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            logging.warning(f"Не удалось уведомить админа {admin[0]}: {e}")
-
-    await message.answer(
-        "✅ Ваше сообщение отправлено администратору. Ожидайте ответа!\n"
-        "📌 Вы можете продолжать диалог в этом чате.",
-        parse_mode="HTML"
-    )
-
 # ===================== АКЦИИ (ДЛЯ ПОЛЬЗОВАТЕЛЕЙ) =====================
 @dp.callback_query(F.data == "promotions")
 async def cb_promotions(callback: CallbackQuery):
@@ -4591,6 +4536,60 @@ async def cb_set_price_process(message: Message, state: FSMContext):
         parse_mode="HTML"
     )
     await state.clear()
+# ===================== ГЛОБАЛЬНЫЙ ОБРАБОТЧИК СООБЩЕНИЙ =====================
+# ВАЖНО: Этот обработчик должен быть ПОСЛЕ ВСЕХ обработчиков состояний!
+@dp.message()
+async def handle_all_messages(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+
+    # Получаем текущее состояние
+    current_state = await state.get_state()
+
+    # ===== ЕСЛИ ЕСТЬ АКТИВНОЕ СОСТОЯНИЕ — ВЫХОДИМ (не перехватываем) =====
+    if current_state is not None:
+        logging.debug(f"Состояние {current_state} активно, пропускаем глобальный обработчик")
+        return
+
+    if await run_db(is_admin_db, user_id):
+        return
+
+    if message.text and message.text.startswith("/"):
+        return
+
+    if not message.text:
+        await message.answer(
+            "📎 Я принимаю только текстовые сообщения.\n"
+            "Для отправки файлов используйте кнопку '📎 Прикрепить файл' в админ-панели.",
+            parse_mode="HTML"
+        )
+        return
+
+    await run_db(send_message, user_id, None, message.text, 0)
+    await run_db(add_user_log, user_id, "chat_message", f"Отправил сообщение: {message.text[:50]}...")
+
+    admins = await run_db(get_all_admins)
+    user = await run_db(get_user, user_id)
+    name = user[1] or user[2] or str(user_id)
+
+    for admin in admins:
+        try:
+            await bot.send_message(
+                admin[0],
+                f"📩 <b>Новое сообщение от клиента!</b>\n\n"
+                f"👤 {escape_html(name)}\n"
+                f"🆔 ID: {user_id}\n"
+                f"💬 {escape_html(message.text)}\n\n"
+                f"🔹 Нажмите <b>💬 Чаты с клиентами</b> в админ-панели, чтобы ответить.",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logging.warning(f"Не удалось уведомить админа {admin[0]}: {e}")
+
+    await message.answer(
+        "✅ Ваше сообщение отправлено администратору. Ожидайте ответа!\n"
+        "📌 Вы можете продолжать диалог в этом чате.",
+        parse_mode="HTML"
+    )
 
 
 # ===================== ЗАПУСК БОТА =====================
