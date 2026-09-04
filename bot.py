@@ -4425,6 +4425,54 @@ async def poll_closer_loop():
 
 
 # ===================== ИСПРАВЛЕННЫЕ ОБРАБОТЧИКИ ДЛЯ ЗАКАЗОВ =====================
+async def show_order_detail(target, order_id: int, is_callback: bool = False):
+    """Показывает детали заказа в сообщении"""
+    order = await run_db(get_order, order_id)
+    if not order:
+        await target.answer("❌ Заказ не найден", parse_mode="HTML")
+        return
+
+    user = await run_db(get_user, order[1])
+    user_display = f"@{user[1]}" if user and user[1] else f"ID:{order[1]}"
+
+    order_id, user_id, service, price, status, created_at, paid_at, admin_price, admin_note, order_code, rating, review, file_id, is_urgent = order
+    status_text = "✅ Оплачен" if status == "paid" else "⏳ Ожидает оплаты" if status == "pending" else "🔧 В работе" if status == "in_progress" else "❌ Отменён"
+    final_price = admin_price if admin_price > 0 else price
+    display_code = order_code or f"#{order_id}"
+    urgent = "🔥 Срочный заказ!\n" if is_urgent else ""
+    created = datetime.fromisoformat(created_at).strftime("%d.%m.%Y %H:%M")
+    paid = datetime.fromisoformat(paid_at).strftime("%d.%m.%Y %H:%M") if paid_at else "Не оплачен"
+
+    text = f"""
+<b>📦 Информация о заказе {escape_html(display_code)}</b>
+
+{urgent}👤 Пользователь: {escape_html(user_display)} (ID: {user_id})
+📝 Услуга: {escape_html(service)}
+💰 Изначальная цена: {price} руб.
+💰 Назначенная цена: <b>{final_price} руб.</b>
+📊 Статус: {status_text}
+📅 Создан: {created}
+✅ Оплачен: {paid}
+"""
+    if rating > 0:
+        text += f"⭐ Оценка: {rating}/5\n"
+        if review:
+            text += f"📝 Отзыв: {escape_html(review)}\n"
+    if file_id:
+        text += f"📎 Прикреплён файл: ✅\n"
+    if admin_note:
+        text += f"📌 Заметка: {escape_html(admin_note)}\n"
+
+    if is_callback:
+        try:
+            await target.edit_text(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent),
+                                   parse_mode="HTML")
+        except Exception:
+            await target.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent),
+                                parse_mode="HTML")
+    else:
+        await target.answer(text, reply_markup=order_detail_keyboard(order_id, status, is_urgent), parse_mode="HTML")
+
 
 @dp.callback_query(F.data.startswith("confirm_payment_"))
 async def cb_confirm_payment(callback: CallbackQuery):
@@ -4545,8 +4593,38 @@ async def handle_all_messages(message: Message, state: FSMContext):
     # Получаем текущее состояние
     current_state = await state.get_state()
 
-    # ===== ЕСЛИ ЕСТЬ АКТИВНОЕ СОСТОЯНИЕ — ВЫХОДИМ (не перехватываем) =====
-    if current_state is not None:
+    # ===== СПИСОК СОСТОЯНИЙ, КОТОРЫЕ НУЖНО ПРОПУСТИТЬ =====
+    states_to_skip = [
+        "ReviewState:waiting_for_review",
+        "AdminSetPriceState:waiting_for_price",
+        "AdminPromocodeCreateState:waiting_for_discount",
+        "AdminPromocodeCreateState:waiting_for_valid_until",
+        "AdminPromocodeCreateState:waiting_for_max_uses",
+        "AdminServiceEditState:waiting_for_name",
+        "AdminServiceEditState:waiting_for_description",
+        "AdminServiceEditState:waiting_for_price",
+        "ChatState:sending",
+        "SupportState:waiting_for_message",
+        "AdminBroadcastState:waiting_for_message",
+        "AdminDeleteOldState:waiting_for_days",
+        "AttachFileState:waiting_for_file",
+        "AdminServiceAddState:waiting_for_name",
+        "AdminServiceAddState:waiting_for_description",
+        "AdminServiceAddState:waiting_for_price",
+        "AdminPollCreateState:waiting_for_question",
+        "AdminPollCreateState:waiting_for_options",
+        "AdminPollCreateState:waiting_for_expiry",
+        "UserPromocodeState:waiting_for_code",
+        "UserBirthdayState:waiting_for_birthday",
+        "AdminPromotionCreateState:waiting_for_name",
+        "AdminPromotionCreateState:waiting_for_service",
+        "AdminPromotionCreateState:waiting_for_description",
+        "AdminPromotionCreateState:waiting_for_discount",
+        "AdminPromotionCreateState:waiting_for_valid_until"
+    ]
+
+    # ===== ЕСЛИ ЕСТЬ АКТИВНОЕ СОСТОЯНИЕ — ВЫХОДИМ =====
+    if current_state in states_to_skip or current_state is not None:
         logging.debug(f"Состояние {current_state} активно, пропускаем глобальный обработчик")
         return
 
@@ -4590,7 +4668,6 @@ async def handle_all_messages(message: Message, state: FSMContext):
         "📌 Вы можете продолжать диалог в этом чате.",
         parse_mode="HTML"
     )
-
 
 # ===================== ЗАПУСК БОТА =====================
 async def main():
