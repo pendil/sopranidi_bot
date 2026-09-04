@@ -1498,6 +1498,7 @@ class AdminPollCreateState(StatesGroup):
 
 
 class AdminPromocodeCreateState(StatesGroup):
+    waiting_for_code = State()
     waiting_for_discount = State()
     waiting_for_valid_until = State()
     waiting_for_max_uses = State()
@@ -2428,15 +2429,65 @@ async def cb_promocode_create(callback: CallbackQuery, state: FSMContext):
     if not is_super_admin(callback.from_user.id):
         await callback.answer("⛔ Только супер-админ имеет доступ", show_alert=True)
         return
+
     await callback.message.edit_text(
-        "🏷️ <b>Создание промокода</b>\n\nВведите размер скидки в % (только число, например, 15):",
+        "🏷️ <b>Создание промокода</b>\n\n"
+        "Введите <b>название</b> промокода (латиницей, цифры, от 3 до 20 символов):\n\n"
+        "Примеры: <code>SUMMER2026</code>, <code>STUDENT25</code>, <code>VIPDISC</code>",
         reply_markup=back_to_admin_keyboard(),
         parse_mode="HTML"
     )
-    await state.set_state(AdminPromocodeCreateState.waiting_for_discount)
+    await state.set_state(AdminPromocodeCreateState.waiting_for_code)
     await callback.answer()
 
+@dp.message(AdminPromocodeCreateState.waiting_for_code)
+async def process_promo_code(message: Message, state: FSMContext):
+    if not is_super_admin(message.from_user.id):
+        await message.answer("⛔ Нет доступа.", parse_mode="HTML")
+        await state.clear()
+        return
 
+    if message.text and message.text.startswith("/"):
+        await state.clear()
+        return
+
+    code = message.text.strip().upper()
+
+    # Проверка: только буквы и цифры
+    if not code.isalnum():
+        await message.answer(
+            "❌ Название промокода должно содержать только буквы и цифры.\n"
+            "Попробуйте снова:",
+            parse_mode="HTML"
+        )
+        return
+
+    # Проверка: длина от 3 до 20
+    if len(code) < 3 or len(code) > 20:
+        await message.answer(
+            "❌ Название промокода должно быть от 3 до 20 символов.\n"
+            "Попробуйте снова:",
+            parse_mode="HTML"
+        )
+        return
+
+    # Проверка: существует ли уже такой промокод
+    existing = await run_db(get_promocode, code)
+    if existing:
+        await message.answer(
+            f"❌ Промокод <b>{escape_html(code)}</b> уже существует.\n"
+            "Придумайте другое название:",
+            parse_mode="HTML"
+        )
+        return
+
+    await state.update_data(code=code)
+    await message.answer(
+        f"✅ Название промокода: <b>{escape_html(code)}</b>\n\n"
+        "Теперь введите размер скидки в % (только число, например, 15):",
+        parse_mode="HTML"
+    )
+    await state.set_state(AdminPromocodeCreateState.waiting_for_discount)
 @dp.message(AdminPromocodeCreateState.waiting_for_discount)
 async def process_promo_discount(message: Message, state: FSMContext):
     if not is_super_admin(message.from_user.id):
@@ -2501,18 +2552,37 @@ async def process_promo_max_uses(message: Message, state: FSMContext):
             await message.answer("❌ Количество использований должно быть положительным. Попробуйте снова:",
                                  parse_mode="HTML")
             return
+
         data = await state.get_data()
-        code = generate_promo_code()
-        await run_db(create_promocode, code, data['discount'], data['valid_until'], max_uses, message.from_user.id)
-        await run_db(add_admin_log, message.from_user.id, "create_promocode",
-                     f"Создал промокод {code} ({data['discount']}%)")
+
+        # Вместо generate_promo_code() используем введённый код
+        code = data.get('code')  # <-- ЭТО ГЛАВНОЕ ИЗМЕНЕНИЕ!
+
+        await run_db(
+            create_promocode,
+            code,
+            data['discount'],
+            data['valid_until'],
+            max_uses,
+            message.from_user.id
+        )
+
+        await run_db(
+            add_admin_log,
+            message.from_user.id,
+            "create_promocode",
+            f"Создал промокод {code} ({data['discount']}%)"
+        )
+
         text = (f"✅ <b>Промокод создан!</b>\n\n"
                 f"🏷️ Код: <b>{escape_html(code)}</b>\n"
                 f"🎉 Скидка: <b>{data['discount']}%</b>\n"
                 f"📅 Действует до: {datetime.fromisoformat(data['valid_until']).strftime('%d.%m.%Y')}\n"
                 f"🔢 Макс. использований: {max_uses}")
+
         await message.answer(text, reply_markup=admin_menu_keyboard(message.from_user.id), parse_mode="HTML")
         await state.clear()
+
     except ValueError:
         await message.answer("❌ Введите корректное число. Попробуйте снова:", parse_mode="HTML")
 
