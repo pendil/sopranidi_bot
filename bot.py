@@ -4516,6 +4516,47 @@ async def cb_confirm_payment(callback: CallbackQuery):
     # Обновляем сообщение с деталями заказа
     await show_order_detail(callback.message, order_id, is_callback=True)
 
+
+@dp.callback_query(F.data.startswith("delete_order_"))
+async def cb_delete_order(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    try:
+        order_id = int(callback.data.split("_")[2])
+    except (ValueError, IndexError):
+        await callback.answer("❌ Ошибка: неверный формат данных", show_alert=True)
+        return
+
+    order = await run_db(get_order, order_id)
+    if not order:
+        await callback.answer("❌ Заказ не найден", show_alert=True)
+        return
+
+    order_code = order[9] or f"#{order_id}"
+
+    # Удаляем заказ
+    await run_db(delete_order, order_id)
+    await run_db(add_admin_log, callback.from_user.id, "delete_order",
+                 f"Удалил заказ {order_code}")
+
+    # Уведомляем пользователя (если есть)
+    try:
+        await bot.send_message(
+            order[1],
+            f"❌ <b>Заказ {order_code} был удалён администратором.</b>\n\n"
+            f"Услуга: {order[2]}\n"
+            f"Если у вас есть вопросы, свяжитесь с поддержкой: {DISPATCHER_USERNAME}",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logging.warning(f"Не удалось уведомить пользователя {order[1]}: {e}")
+
+    await callback.answer(f"✅ Заказ {order_code} удалён!", show_alert=True)
+
+    # Возвращаемся к списку заказов
+    await cb_admin_orders(callback)
 @dp.callback_query(F.data.startswith("set_price_"))
 async def cb_set_price_start(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
