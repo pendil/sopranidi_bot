@@ -4475,6 +4475,119 @@ async def poll_closer_loop():
         await asyncio.sleep(300)
 
 
+# ===================== ИСПРАВЛЕННЫЕ ОБРАБОТЧИКИ ДЛЯ ЗАКАЗОВ =====================
+
+@dp.callback_query(F.data.startswith("confirm_payment_"))
+async def cb_confirm_payment(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    try:
+        order_id = int(callback.data.split("_")[2])
+    except (ValueError, IndexError):
+        await callback.answer("❌ Ошибка: неверный формат данных", show_alert=True)
+        return
+
+    order = await run_db(get_order, order_id)
+    if not order:
+        await callback.answer("❌ Заказ не найден", show_alert=True)
+        return
+
+    if order[4] != "pending":
+        await callback.answer("❌ Заказ уже оплачен или отменён", show_alert=True)
+        return
+
+    order_code = order[9] or f"#{order_id}"
+    user_id, service, price = order[1], order[2], order[3]
+    admin_price = order[7]
+    final_price = admin_price if admin_price > 0 else price
+
+    await run_db(update_order_status, order_id, "paid")
+    await run_db(add_admin_log, callback.from_user.id, "confirm_payment",
+                 f"Подтвердил оплату заказа {order_code} ({final_price} руб.)")
+
+    try:
+        await bot.send_message(user_id,
+                               f"✅ <b>Оплата подтверждена!</b>\n\nЗаказ {order_code}: {service}\nСумма: <b>{final_price} руб.</b>\n\nСпасибо за оплату! Мы свяжемся с вами в ближайшее время.\nДиспетчер: {DISPATCHER_USERNAME}",
+                               parse_mode="HTML")
+    except Exception as e:
+        logging.warning(f"Не удалось уведомить пользователя {user_id}: {e}")
+
+    await callback.answer("✅ Оплата подтверждена!", show_alert=True)
+    await cb_order_detail(callback)
+
+
+@dp.callback_query(F.data.startswith("set_price_"))
+async def cb_set_price_start(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    try:
+        order_id = int(callback.data.split("_")[2])
+    except (ValueError, IndexError):
+        await callback.answer("❌ Ошибка: неверный формат данных", show_alert=True)
+        return
+
+    order = await run_db(get_order, order_id)
+    if not order:
+        await callback.answer("❌ Заказ не найден", show_alert=True)
+        return
+
+    await state.update_data(order_id=order_id)
+    await callback.message.edit_text(
+        f"💰 <b>Назначение цены для заказа {order[9] or f'#{order_id}'}</b>\n\n"
+        f"Текущая цена: {order[3]} руб.\n\n"
+        f"Введите новую цену (только число):",
+        reply_markup=back_to_admin_keyboard(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AdminSetPriceState.waiting_for_price)
+    await callback.answer()
+
+
+@dp.message(AdminSetPriceState.waiting_for_price)
+async def cb_set_price_process(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Нет доступа.", parse_mode="HTML")
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    order_id = data.get("order_id")
+
+    if not order_id:
+        await message.answer("❌ Ошибка: заказ не найден.", parse_mode="HTML")
+        await state.clear()
+        return
+
+    try:
+        new_price = int(message.text.strip())
+    except ValueError:
+        await message.answer("❌ Введите число. Например: 5000", parse_mode="HTML")
+        return
+
+    if new_price <= 0:
+        await message.answer("❌ Цена должна быть больше 0.", parse_mode="HTML")
+        return
+
+    order = await run_db(get_order, order_id)
+    order_code = order[9] if order else f"#{order_id}"
+
+    await run_db(update_order_price, order_id, new_price, "")
+    await run_db(add_admin_log, message.from_user.id, "set_price",
+                 f"Назначил цену {new_price} руб. для заказа {order_code}")
+
+    await message.answer(
+        f"✅ Цена для заказа <b>{escape_html(order_code)}</b> обновлена на <b>{new_price} руб.</b>\n\n"
+        f"Теперь вы можете подтвердить оплату!",
+        reply_markup=admin_menu_keyboard(message.from_user.id),
+        parse_mode="HTML"
+    )
+    await state.clear()
+
+
 # ===================== ЗАПУСК БОТА =====================
 async def main():
     init_db()
