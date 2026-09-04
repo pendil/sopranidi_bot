@@ -1853,8 +1853,13 @@ async def cmd_broadcast(message: Message, state: FSMContext):
 async def handle_all_messages(message: Message, state: FSMContext):
     user_id = message.from_user.id
 
+    # Получаем текущее состояние
     current_state = await state.get_state()
+
+    # ===== ЕСЛИ ЕСТЬ АКТИВНОЕ СОСТОЯНИЕ — ПРОПУСКАЕМ =====
     if current_state is not None:
+        # Состояния обрабатываются своими обработчиками
+        # НЕ возвращаемся, чтобы не блокировать другие обработчики
         return
 
     if await run_db(is_admin_db, user_id):
@@ -1897,7 +1902,6 @@ async def handle_all_messages(message: Message, state: FSMContext):
         "📌 Вы можете продолжать диалог в этом чате.",
         parse_mode="HTML"
     )
-
 
 # ===================== АКЦИИ (ДЛЯ ПОЛЬЗОВАТЕЛЕЙ) =====================
 @dp.callback_query(F.data == "promotions")
@@ -4515,8 +4519,9 @@ async def cb_confirm_payment(callback: CallbackQuery):
         logging.warning(f"Не удалось уведомить пользователя {user_id}: {e}")
 
     await callback.answer("✅ Оплата подтверждена!", show_alert=True)
-    await cb_order_detail(callback)
 
+    # Обновляем сообщение с деталями заказа
+    await show_order_detail(callback.message, order_id, is_callback=True)
 
 @dp.callback_query(F.data.startswith("set_price_"))
 async def cb_set_price_start(callback: CallbackQuery, state: FSMContext):
