@@ -2425,7 +2425,12 @@ async def chat_send_message(message: Message, state: FSMContext):
         logging.error(f"Ошибка отправки сообщения пользователю {user_id}: {e}")
         await message.answer("❌ Не удалось отправить сообщение пользователю.", parse_mode="HTML")
 
-    await cb_chat_open(message, state)
+    # Возвращаемся в чат без повторного открытия
+    await message.answer(
+        "💬 Продолжайте общение. Для выхода из чата отправьте /cancel",
+        reply_markup=back_to_admin_keyboard(),
+        parse_mode="HTML"
+    )
 
 
 @dp.callback_query(F.data.startswith("chat_close_"))
