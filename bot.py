@@ -1274,6 +1274,7 @@ def admin_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     builder.button(text="⭐ Управление отзывами", callback_data="admin_reviews")
     builder.button(text="💬 Чаты с клиентами", callback_data="admin_chats")
     builder.button(text="📋 Логи", callback_data="admin_logs")
+    builder.button(text="💬 Чаты с клиентами", callback_data="admin_chats")
 
     # Функции только для супер-админа
     if is_super:
