@@ -1274,7 +1274,6 @@ def admin_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     builder.button(text="⭐ Управление отзывами", callback_data="admin_reviews")
     builder.button(text="💬 Чаты с клиентами", callback_data="admin_chats")
     builder.button(text="📋 Логи", callback_data="admin_logs")
-    builder.button(text="💬 Чаты с клиентами", callback_data="admin_chats")
 
     # Функции только для супер-админа
     if is_super:
@@ -1677,6 +1676,48 @@ async def cmd_policy(message: Message):
 
     await message.answer(text, reply_markup=keyboard.as_markup(), parse_mode="HTML")
 
+
+@dp.message(Command("chat"))
+async def cmd_chat(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Нет доступа.", parse_mode="HTML")
+        return
+
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer(
+            "💬 <b>Начать чат с пользователем</b>\n\n"
+            "Использование:\n"
+            "<code>/chat 123456789</code>\n\n"
+            "Где 123456789 — ID пользователя.\n\n"
+            "После этого все ваши сообщения будут отправлены пользователю.\n"
+            "Для выхода из чата отправьте /cancel",
+            parse_mode="HTML"
+        )
+        return
+
+    try:
+        user_id = int(args[1])
+    except ValueError:
+        await message.answer("❌ Укажите корректный ID пользователя (только число).", parse_mode="HTML")
+        return
+
+    user = await run_db(get_user_by_id, user_id)
+    if not user:
+        await message.answer("❌ Пользователь с таким ID не найден в базе.", parse_mode="HTML")
+        return
+
+    name = user[1] or user[2] or str(user_id)
+
+    await message.answer(
+        f"💬 <b>Чат с {escape_html(name)}</b> (ID: {user_id})\n\n"
+        f"Теперь пишите сообщения, они будут отправлены пользователю.\n"
+        f"Для выхода из чата отправьте /cancel",
+        parse_mode="HTML"
+    )
+
+    await state.set_state(ChatState.sending)
+    await state.update_data(chat_user_id=user_id)
 
 @dp.message(Command("set_birthday"))
 async def cmd_set_birthday(message: Message, state: FSMContext):
