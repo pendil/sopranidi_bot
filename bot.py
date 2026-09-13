@@ -3732,7 +3732,102 @@ async def cb_accept_urgent(callback: CallbackQuery):
     await callback.answer("✅ Срочный заказ принят в работу!", show_alert=True)
     await cb_order_detail(callback)
 
+@dp.callback_query(F.data.startswith("start_work_"))
+async def cb_start_work(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
 
+    try:
+        order_id = int(callback.data.split("_")[2])
+    except (ValueError, IndexError):
+        await callback.answer("❌ Ошибка: неверный формат данных", show_alert=True)
+        return
+
+    order = await run_db(get_order, order_id)
+    if not order:
+        await callback.answer("❌ Заказ не найден", show_alert=True)
+        return
+
+    if order[4] != "pending":
+        await callback.answer("❌ Заказ уже в работе или завершён", show_alert=True)
+        return
+
+    order_code = order[9] or f"#{order_id}"
+    user_id = order[1]
+    service = order[2]
+
+    # Меняем статус на "в работе"
+    await run_db(update_order_status, order_id, "in_progress")
+    await run_db(add_admin_log, callback.from_user.id, "start_work",
+                 f"Взял в работу заказ {order_code}")
+
+    # Уведомляем клиента
+    try:
+        await bot.send_message(
+            user_id,
+            f"🔧 <b>Ваш заказ взят в работу!</b>\n\n"
+            f"Заказ {order_code}: {service}\n"
+            f"Статус: <b>В работе</b>\n\n"
+            f"Мы сообщим, когда работа будет готова.\n"
+            f"Диспетчер: {DISPATCHER_USERNAME}",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logging.warning(f"Не удалось уведомить пользователя {user_id}: {e}")
+
+    await callback.answer("✅ Заказ взят в работу!", show_alert=True)
+
+    # Обновляем сообщение с деталями заказа
+    await show_order_detail(callback.message, order_id, is_callback=True)
+
+# ===================== АДМИН: ЗАВЕРШИТЬ РАБОТУ =====================
+@dp.callback_query(F.data.startswith("complete_work_"))
+async def cb_complete_work(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    try:
+        order_id = int(callback.data.split("_")[2])
+    except (ValueError, IndexError):
+        await callback.answer("❌ Ошибка: неверный формат данных", show_alert=True)
+        return
+
+    order = await run_db(get_order, order_id)
+    if not order:
+        await callback.answer("❌ Заказ не найден", show_alert=True)
+        return
+
+    if order[4] != "in_progress":
+        await callback.answer("❌ Заказ не в работе", show_alert=True)
+        return
+
+    order_code = order[9] or f"#{order_id}"
+    user_id = order[1]
+    service = order[2]
+
+    await run_db(update_order_status, order_id, "paid")
+    await run_db(add_admin_log, callback.from_user.id, "complete_work",
+                 f"Завершил работу над заказом {order_code}")
+
+    try:
+        await bot.send_message(
+            user_id,
+            f"✅ <b>Ваш заказ готов!</b>\n\n"
+            f"Заказ {order_code}: {service}\n"
+            f"Статус: <b>Выполнен</b>\n\n"
+            f"Спасибо за заказ! Оставьте отзыв в разделе 'Мои заказы'.\n"
+            f"Диспетчер: {DISPATCHER_USERNAME}",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logging.warning(f"Не удалось уведомить пользователя {user_id}: {e}")
+
+    await callback.answer("✅ Работа завершена!", show_alert=True)
+
+    await show_order_detail(callback.message, order_id, is_callback=True)
+    
 # ===================== АДМИН: ОТЗЫВЫ =====================
 @dp.callback_query(F.data == "admin_reviews")
 async def cb_admin_reviews(callback: CallbackQuery):
