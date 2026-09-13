@@ -1,4 +1,21 @@
 # -*- coding: utf-8 -*-
+"""
+Sopranidi Corporation Telegram Bot (aiogram 3 + SQLite)
+
+ИСПРАВЛЕНИЯ В ЭТОЙ ВЕРСИИ:
+1. Удалены дублирующиеся обработчики set_price (критический баг).
+2. is_admin_db теперь проверяет и MAIN_ADMINS, и таблицу admins в БД.
+3. Строковые FSM-состояния заменены на нормальные StatesGroup
+   (AdminAddState, AdminPromoManageState).
+4. Упрощён и сделан надёжнее глобальный обработчик сообщений.
+5. Добавлена защита от некорректного order_id в set_price.
+6. Небольшие улучшения читаемости и стабильности.
+
+Что нужно сделать перед запуском:
+- Установить зависимости: aiogram, python-dotenv, openpyxl (опционально)
+- Создать .env с BOT_TOKEN=... и при необходимости ADMINS=123,456
+- Положить logo.jpg и папку examples/ рядом с ботом (опционально)
+"""
 
 import asyncio
 import logging
@@ -356,6 +373,23 @@ def init_db():
             action TEXT,
             details TEXT,
             timestamp TEXT
+        )
+    """)
+
+    # Единая таблица отзывов (реальные + фейковые)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_id INTEGER DEFAULT NULL,
+            author_name TEXT NOT NULL,
+            service_name TEXT NOT NULL,
+            rating INTEGER NOT NULL,
+            review_text TEXT DEFAULT '',
+            display_date TEXT NOT NULL,
+            is_fake INTEGER DEFAULT 0,
+            is_visible INTEGER DEFAULT 1,
+            created_at TEXT,
+            created_by INTEGER DEFAULT NULL
         )
     """)
 
@@ -827,19 +861,74 @@ def get_all_users():
     return rows
 
 
-def get_all_reviews():
+def get_all_reviews(visible_only: bool = True):
+    """Единый список отзывов (реальные + фейковые) для отображения пользователям и админам."""
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
-    cur.execute("""
-        SELECT o.order_code, o.service, o.rating, o.review, u.username, u.first_name, o.created_at
-        FROM orders o
-        LEFT JOIN users u ON o.user_id = u.user_id
-        WHERE o.rating > 0 AND o.review != ''
-        ORDER BY o.created_at DESC
-    """)
+    if visible_only:
+        cur.execute("""
+            SELECT id, author_name, service_name, rating, review_text, display_date, is_fake, is_visible, order_id
+            FROM reviews
+            WHERE is_visible = 1
+            ORDER BY display_date DESC, id DESC
+        """)
+    else:
+        cur.execute("""
+            SELECT id, author_name, service_name, rating, review_text, display_date, is_fake, is_visible, order_id
+            FROM reviews
+            ORDER BY display_date DESC, id DESC
+        """)
     rows = cur.fetchall()
     conn.close()
     return rows
+
+
+def add_review(author_name: str, service_name: str, rating: int, review_text: str,
+               display_date: str = None, is_fake: int = 0, order_id: int = None, created_by: int = None):
+    """Добавить отзыв (реальный или фейковый)."""
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    if not display_date:
+        display_date = datetime.now().strftime("%d.%m.%Y")
+    created_at = datetime.now().isoformat()
+    cur.execute("""
+        INSERT INTO reviews (order_id, author_name, service_name, rating, review_text,
+                             display_date, is_fake, is_visible, created_at, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+    """, (order_id, author_name, service_name, rating, review_text or "",
+          display_date, is_fake, created_at, created_by))
+    review_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return review_id
+
+
+def get_review_by_id(review_id: int):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, author_name, service_name, rating, review_text, display_date, is_fake, is_visible, order_id, created_by
+        FROM reviews WHERE id = ?
+    """, (review_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def set_review_visibility(review_id: int, is_visible: int):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("UPDATE reviews SET is_visible = ? WHERE id = ?", (is_visible, review_id))
+    conn.commit()
+    conn.close()
+
+
+def delete_review(review_id: int):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM reviews WHERE id = ?", (review_id,))
+    conn.commit()
+    conn.close()
 
 
 def get_user_logs(user_id: int, limit: int = 20):
@@ -1545,6 +1634,14 @@ class AdminPromoManageState(StatesGroup):
     waiting_for_delete = State()
 
 
+class AdminFakeReviewState(StatesGroup):
+    waiting_for_name = State()
+    waiting_for_service = State()
+    waiting_for_rating = State()
+    waiting_for_text = State()
+    waiting_for_date = State()
+
+
 # ===================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====================
 async def update_message(callback: CallbackQuery, text: str, reply_markup=None, parse_mode="HTML"):
     try:
@@ -1959,34 +2056,71 @@ async def cb_promotions(callback: CallbackQuery):
     await callback.answer()
 
 
-# ===================== ПРОСМОТР ОТЗЫВОВ =====================
+# ===================== ПРОСМОТР ОТЗЫВОВ (для пользователей) =====================
+def _format_review_card(author_name, service_name, rating, review_text, display_date) -> str:
+    stars = "⭐" * rating + "☆" * (5 - rating)
+    text = f"👤 <b>{escape_html(author_name)}</b>\n"
+    text += f"📋 {escape_html(service_name)}\n"
+    text += f"{stars} <b>{rating}/5</b>\n"
+    if review_text:
+        text += f"💬 «{escape_html(review_text[:180])}{'…' if len(review_text) > 180 else ''}»\n"
+    text += f"📅 {escape_html(display_date)}\n"
+    return text
+
+
 @dp.callback_query(F.data == "view_reviews")
 async def cb_view_reviews(callback: CallbackQuery):
     user_id = callback.from_user.id
     await run_db(update_user_action, user_id, "view_reviews")
     await run_db(add_user_log, user_id, "view_reviews", "Просмотрел отзывы")
-    reviews = await run_db(get_all_reviews)
+    reviews = await run_db(get_all_reviews, True)
     if not reviews:
-        text = "⭐ <b>Отзывы</b>\n\nПока нет ни одного отзыва. Будьте первым!"
+        text = "⭐ <b>Отзывы клиентов</b>\n\nПока нет ни одного отзыва.\nБудьте первым — оформите заказ и оставьте отзыв!"
         await update_message(callback, text, back_to_main_keyboard(), "HTML")
         await callback.answer()
         return
-    text = "<b>⭐ Отзывы наших клиентов:</b>\n\n"
-    for review in reviews[:10]:
-        order_code, service, rating, review_text, username, first_name, created_at = review
-        name = username or first_name or "Аноним"
-        created = datetime.fromisoformat(created_at).strftime("%d.%m.%Y")
-        stars = "⭐" * rating + "☆" * (5 - rating)
-        text += f"📌 <b>{escape_html(order_code)}</b> - {escape_html(service)}\n"
-        text += f"👤 {escape_html(name)}\n"
-        text += f"{stars} {rating}/5\n"
-        if review_text:
-            text += f"📝 \"{escape_html(review_text[:100])}{'...' if len(review_text) > 100 else ''}\"\n"
-        text += f"📅 {created}\n\n"
-    if len(reviews) > 10:
-        text += f"📌 Показано 10 из {len(reviews)} отзывов"
-    await update_message(callback, text, back_to_main_keyboard(), "HTML")
+    await _show_reviews_page(callback, reviews, page=0)
+
+
+async def _show_reviews_page(callback: CallbackQuery, reviews: list, page: int = 0):
+    per_page = 5
+    total = len(reviews)
+    start = page * per_page
+    end = start + per_page
+    page_reviews = reviews[start:end]
+
+    avg = round(sum(r[3] for r in reviews) / total, 1) if total else 0
+    text = f"⭐ <b>Отзывы клиентов</b>\n"
+    text += f"📊 Всего: <b>{total}</b> · Средняя оценка: <b>{avg}/5</b>\n\n"
+
+    for rev in page_reviews:
+        # id, author_name, service_name, rating, review_text, display_date, is_fake, is_visible, order_id
+        _, author_name, service_name, rating, review_text, display_date, *_ = rev
+        text += _format_review_card(author_name, service_name, rating, review_text, display_date)
+        text += "──────────────\n"
+
+    keyboard = InlineKeyboardBuilder()
+    nav = []
+    if page > 0:
+        nav.append(("◀️ Назад", f"reviews_user_page_{page - 1}"))
+    if end < total:
+        nav.append(("Вперёд ▶️", f"reviews_user_page_{page + 1}"))
+    for t, d in nav:
+        keyboard.button(text=t, callback_data=d)
+    keyboard.button(text="🔙 В меню", callback_data="main_menu")
+    keyboard.adjust(2 if len(nav) == 2 else 1, 1)
+
+    page_info = f"\n📄 Страница {page + 1} из {(total + per_page - 1) // per_page}" if total > per_page else ""
+    text += page_info
+    await update_message(callback, text, keyboard.as_markup(), "HTML")
     await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("reviews_user_page_"))
+async def cb_reviews_user_page(callback: CallbackQuery):
+    page = int(callback.data.split("_")[-1])
+    reviews = await run_db(get_all_reviews, True)
+    await _show_reviews_page(callback, reviews, page=page)
 
 
 # ===================== ПРОФИЛЬ =====================
@@ -3859,133 +3993,336 @@ async def cb_admin_reviews(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
-    reviews = await run_db(get_all_reviews)
-    await run_db(add_admin_log, callback.from_user.id, "view_reviews", "Просмотрел список отзывов")
-    if not reviews:
-        await update_message(callback, "⭐ Отзывов пока нет.", admin_menu_keyboard(callback.from_user.id), "HTML")
-        await callback.answer()
-        return
-    await update_message(callback, "⭐ <b>Управление отзывами</b>\n\nВыберите отзыв для управления:",
-                         reviews_keyboard(reviews, 0), "HTML")
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("reviews_page_"))
-async def cb_reviews_page(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("⛔ Нет доступа", show_alert=True)
-        return
-    page = int(callback.data.split("_")[2])
-    reviews = await run_db(get_all_reviews)
-    await callback.message.edit_reply_markup(reply_markup=reviews_keyboard(reviews, page))
-    await callback.answer()
-
-
-def _get_review_by_code(order_code: str):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT o.order_code, o.service, o.rating, o.review, u.username, u.first_name, o.created_at, o.order_id
-        FROM orders o
-        LEFT JOIN users u ON o.user_id = u.user_id
-        WHERE o.order_code = ? AND o.rating > 0
-    """, (order_code,))
-    row = cur.fetchone()
-    conn.close()
-    return row
-
-
-def _delete_review_by_code(order_code: str):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("SELECT order_id, service, rating, review FROM orders WHERE order_code = ?", (order_code,))
-    row = cur.fetchone()
-    conn.close()
-    return row
-
-
-def _reset_review_by_code(order_code: str):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("UPDATE orders SET rating = 0, review = '' WHERE order_code = ?", (order_code,))
-    conn.commit()
-    conn.close()
-
-
-@dp.callback_query(F.data.startswith("review_detail_"))
-async def cb_review_detail(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("⛔ Нет доступа", show_alert=True)
-        return
-    order_code = callback.data.split("_")[2]
-    review = await run_db(_get_review_by_code, order_code)
-    if not review:
-        await callback.answer("❌ Отзыв не найден", show_alert=True)
-        return
-    order_code, service, rating, review_text, username, first_name, created_at, order_id = review
-    name = username or first_name or "Аноним"
-    created = datetime.fromisoformat(created_at).strftime("%d.%m.%Y %H:%M")
-    stars = "⭐" * rating + "☆" * (5 - rating)
-    text = f"""
-<b>⭐ Детали отзыва</b>
-
-📌 Заказ: {escape_html(order_code)}
-📝 Услуга: {escape_html(service)}
-👤 Автор: {escape_html(name)}
-{stars} {rating}/5
-📝 Отзыв: {escape_html(review_text or 'Без текста')}
-📅 Дата: {created}
-"""
+    await run_db(add_admin_log, callback.from_user.id, "view_reviews", "Открыл управление отзывами")
+    reviews = await run_db(get_all_reviews, False)  # все, включая скрытые
+    visible = sum(1 for r in reviews if r[7] == 1)
+    fake = sum(1 for r in reviews if r[6] == 1)
+    text = (
+        f"⭐ <b>Управление отзывами</b>\n\n"
+        f"Всего: <b>{len(reviews)}</b> · Видимых: <b>{visible}</b> · Фейковых: <b>{fake}</b>\n\n"
+        f"Выберите действие:"
+    )
     keyboard = InlineKeyboardBuilder()
-    keyboard.button(text="❌ Удалить отзыв", callback_data=f"delete_review_{order_code}")
+    keyboard.button(text="➕ Создать фейковый отзыв", callback_data="fake_review_create")
+    keyboard.button(text="📋 Список отзывов", callback_data="admin_reviews_list_0")
+    keyboard.button(text="🔙 Назад", callback_data="admin_menu")
+    keyboard.adjust(1)
+    await update_message(callback, text, keyboard.as_markup(), "HTML")
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("admin_reviews_list_"))
+async def cb_admin_reviews_list(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    page = int(callback.data.split("_")[-1])
+    reviews = await run_db(get_all_reviews, False)
+    per_page = 8
+    start = page * per_page
+    end = start + per_page
+    page_reviews = reviews[start:end]
+
+    text = f"⭐ <b>Список отзывов</b> (стр. {page + 1})\n\n"
+    keyboard = InlineKeyboardBuilder()
+    for rev in page_reviews:
+        rid, author, service, rating, rtext, ddate, is_fake, is_visible, *_ = rev
+        fake_mark = "🎭" if is_fake else "✅"
+        vis_mark = "👁" if is_visible else "🙈"
+        label = f"{fake_mark}{vis_mark} {author[:12]} · {service[:10]} · {rating}★"
+        keyboard.button(text=label, callback_data=f"admin_review_{rid}")
+    nav = []
+    if page > 0:
+        nav.append(("◀️", f"admin_reviews_list_{page - 1}"))
+    if end < len(reviews):
+        nav.append(("▶️", f"admin_reviews_list_{page + 1}"))
+    for t, d in nav:
+        keyboard.button(text=t, callback_data=d)
     keyboard.button(text="🔙 Назад", callback_data="admin_reviews")
     keyboard.adjust(1)
     await update_message(callback, text, keyboard.as_markup(), "HTML")
     await callback.answer()
 
 
-@dp.callback_query(F.data.startswith("delete_review_"))
-async def cb_delete_review_confirm(callback: CallbackQuery):
+@dp.callback_query(F.data.startswith("admin_review_"))
+async def cb_admin_review_detail(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
-    order_code = callback.data.split("_")[2]
-    review = await run_db(_delete_review_by_code, order_code)
-    if not review:
+    try:
+        review_id = int(callback.data.split("_")[2])
+    except (ValueError, IndexError):
+        await callback.answer("❌ Ошибка", show_alert=True)
+        return
+    rev = await run_db(get_review_by_id, review_id)
+    if not rev:
         await callback.answer("❌ Отзыв не найден", show_alert=True)
         return
-    order_id, service, rating, review_text = review
-    text = f"""
-<b>⚠️ Вы уверены, что хотите удалить этот отзыв?</b>
-
-📌 Заказ: {escape_html(order_code)}
-📝 Услуга: {escape_html(service)}
-⭐ Оценка: {rating}/5
-📝 Отзыв: {escape_html(review_text or 'Без текста')}
-
-Это действие невозможно отменить!
-"""
+    rid, author, service, rating, rtext, ddate, is_fake, is_visible, order_id, created_by = rev
+    stars = "⭐" * rating + "☆" * (5 - rating)
+    text = (
+        f"⭐ <b>Отзыв #{rid}</b>\n\n"
+        f"{'🎭 Фейковый' if is_fake else '✅ Реальный'} · "
+        f"{'👁 Виден' if is_visible else '🙈 Скрыт'}\n\n"
+        f"👤 Автор: <b>{escape_html(author)}</b>\n"
+        f"📋 Услуга: {escape_html(service)}\n"
+        f"{stars} <b>{rating}/5</b>\n"
+        f"💬 {escape_html(rtext or 'Без текста')}\n"
+        f"📅 Дата: {escape_html(ddate)}\n"
+    )
+    if order_id:
+        text += f"🔗 Заказ ID: {order_id}\n"
     keyboard = InlineKeyboardBuilder()
-    keyboard.button(text="✅ Да, удалить", callback_data=f"confirm_delete_review_{order_code}")
-    keyboard.button(text="❌ Отмена", callback_data=f"review_detail_{order_code}")
-    keyboard.adjust(1)
+    if is_visible:
+        keyboard.button(text="🙈 Скрыть", callback_data=f"review_hide_{rid}")
+    else:
+        keyboard.button(text="👁 Показать", callback_data=f"review_show_{rid}")
+    keyboard.button(text="🗑️ Удалить", callback_data=f"review_delete_{rid}")
+    keyboard.button(text="🔙 К списку", callback_data="admin_reviews_list_0")
+    keyboard.adjust(2, 1, 1)
     await update_message(callback, text, keyboard.as_markup(), "HTML")
     await callback.answer()
 
 
-@dp.callback_query(F.data.startswith("confirm_delete_review_"))
-async def cb_confirm_delete_review(callback: CallbackQuery):
+@dp.callback_query(F.data.startswith("review_hide_"))
+async def cb_review_hide(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
-    order_code = callback.data.split("_")[3]
-    await run_db(_reset_review_by_code, order_code)
-    await run_db(add_admin_log, callback.from_user.id, "delete_review", f"Удалил отзыв к заказу {order_code}")
-    await callback.message.edit_text(f"✅ Отзыв к заказу <b>{escape_html(order_code)}</b> успешно удалён!",
-                                     reply_markup=admin_menu_keyboard(callback.from_user.id), parse_mode="HTML")
+    rid = int(callback.data.split("_")[2])
+    await run_db(set_review_visibility, rid, 0)
+    await run_db(add_admin_log, callback.from_user.id, "hide_review", f"Скрыл отзыв #{rid}")
+    await callback.answer("🙈 Отзыв скрыт", show_alert=True)
+    callback.data = f"admin_review_{rid}"
+    await cb_admin_review_detail(callback)
+
+
+@dp.callback_query(F.data.startswith("review_show_"))
+async def cb_review_show(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    rid = int(callback.data.split("_")[2])
+    await run_db(set_review_visibility, rid, 1)
+    await run_db(add_admin_log, callback.from_user.id, "show_review", f"Показал отзыв #{rid}")
+    await callback.answer("👁 Отзыв снова виден", show_alert=True)
+    callback.data = f"admin_review_{rid}"
+    await cb_admin_review_detail(callback)
+
+
+@dp.callback_query(F.data.startswith("review_delete_"))
+async def cb_review_delete(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    rid = int(callback.data.split("_")[2])
+    await run_db(delete_review, rid)
+    await run_db(add_admin_log, callback.from_user.id, "delete_review", f"Удалил отзыв #{rid}")
+    await callback.answer("🗑️ Отзыв удалён", show_alert=True)
+    await cb_admin_reviews(callback)
+
+
+# ===================== СОЗДАНИЕ ФЕЙКОВОГО ОТЗЫВА =====================
+@dp.callback_query(F.data == "fake_review_create")
+async def cb_fake_review_create(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    await callback.message.edit_text(
+        "🎭 <b>Создание фейкового отзыва</b>\n\n"
+        "Введите <b>имя автора</b> (никнейм, как будто реальный клиент):\n\n"
+        "Примеры: <code>@ivan_petrov</code>, <code>Мария К.</code>, <code>Алексей</code>",
+        reply_markup=back_to_admin_keyboard(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AdminFakeReviewState.waiting_for_name)
     await callback.answer()
 
 
+@dp.message(AdminFakeReviewState.waiting_for_name)
+async def process_fake_name(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    if message.text and message.text.startswith("/"):
+        await state.clear()
+        return
+    name = message.text.strip()[:50]
+    if len(name) < 2:
+        await message.answer("❌ Имя слишком короткое. Введите ещё раз:", parse_mode="HTML")
+        return
+    await state.update_data(author_name=name)
+
+    services = await run_db(get_all_services)
+    text = "📋 <b>Выберите услугу</b> (или введите название вручную):\n"
+    keyboard = InlineKeyboardBuilder()
+    for s in services:
+        if s[4]:  # is_active
+            keyboard.button(text=s[1][:30], callback_data=f"fake_svc_{s[0]}")
+    keyboard.button(text="✏️ Ввести своё название", callback_data="fake_svc_custom")
+    keyboard.button(text="❌ Отмена", callback_data="admin_reviews")
+    keyboard.adjust(1)
+    await message.answer(text, reply_markup=keyboard.as_markup(), parse_mode="HTML")
+    await state.set_state(AdminFakeReviewState.waiting_for_service)
+
+
+@dp.callback_query(F.data.startswith("fake_svc_"), AdminFakeReviewState.waiting_for_service)
+async def process_fake_service_cb(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    data = callback.data
+    if data == "fake_svc_custom":
+        await callback.message.edit_text(
+            "✏️ Введите название услуги вручную:",
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+    try:
+        sid = int(data.split("_")[2])
+        service = await run_db(get_service, sid)
+        if not service:
+            await callback.answer("❌ Услуга не найдена", show_alert=True)
+            return
+        await state.update_data(service_name=service[1])
+    except Exception:
+        await callback.answer("❌ Ошибка", show_alert=True)
+        return
+    await callback.message.edit_text(
+        f"✅ Услуга: <b>{escape_html(service[1])}</b>\n\n"
+        f"⭐ Выберите оценку от 1 до 5:",
+        parse_mode="HTML"
+    )
+    keyboard = InlineKeyboardBuilder()
+    for i in range(1, 6):
+        keyboard.button(text=f"{'⭐' * i}", callback_data=f"fake_rating_{i}")
+    keyboard.adjust(5)
+    await callback.message.edit_reply_markup(reply_markup=keyboard.as_markup())
+    await state.set_state(AdminFakeReviewState.waiting_for_rating)
+    await callback.answer()
+
+
+@dp.message(AdminFakeReviewState.waiting_for_service)
+async def process_fake_service_text(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    if message.text and message.text.startswith("/"):
+        await state.clear()
+        return
+    name = message.text.strip()[:80]
+    if len(name) < 2:
+        await message.answer("❌ Название слишком короткое.", parse_mode="HTML")
+        return
+    await state.update_data(service_name=name)
+    keyboard = InlineKeyboardBuilder()
+    for i in range(1, 6):
+        keyboard.button(text=f"{'⭐' * i}", callback_data=f"fake_rating_{i}")
+    keyboard.adjust(5)
+    await message.answer(
+        f"✅ Услуга: <b>{escape_html(name)}</b>\n\n⭐ Выберите оценку:",
+        reply_markup=keyboard.as_markup(),
+        parse_mode="HTML"
+    )
+    await state.set_state(AdminFakeReviewState.waiting_for_rating)
+
+
+@dp.callback_query(F.data.startswith("fake_rating_"), AdminFakeReviewState.waiting_for_rating)
+async def process_fake_rating(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    rating = int(callback.data.split("_")[2])
+    await state.update_data(rating=rating)
+    await callback.message.edit_text(
+        f"⭐ Оценка: <b>{rating}/5</b>\n\n"
+        f"💬 Введите текст отзыва (или отправьте <code>/skip</code>, чтобы оставить без текста):",
+        parse_mode="HTML"
+    )
+    await state.set_state(AdminFakeReviewState.waiting_for_text)
+    await callback.answer()
+
+
+@dp.message(AdminFakeReviewState.waiting_for_text)
+async def process_fake_text(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    if message.text and message.text.startswith("/") and message.text != "/skip":
+        await state.clear()
+        return
+    text = "" if (message.text and message.text.strip() == "/skip") else (message.text or "").strip()[:500]
+    await state.update_data(review_text=text)
+    await message.answer(
+        "📅 Введите дату отзыва в формате <b>ДД.ММ.ГГГГ</b>\n"
+        "Пример: <code>15.03.2026</code>\n\n"
+        "Или отправьте <code>/today</code> — будет сегодняшняя дата.",
+        parse_mode="HTML"
+    )
+    await state.set_state(AdminFakeReviewState.waiting_for_date)
+
+
+@dp.message(AdminFakeReviewState.waiting_for_date)
+async def process_fake_date(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    if message.text and message.text.startswith("/") and message.text not in ("/today", "/skip"):
+        await state.clear()
+        return
+
+    raw = (message.text or "").strip()
+    if raw in ("/today", "/skip", ""):
+        display_date = datetime.now().strftime("%d.%m.%Y")
+    else:
+        try:
+            dt = datetime.strptime(raw, "%d.%m.%Y")
+            display_date = dt.strftime("%d.%m.%Y")
+        except ValueError:
+            await message.answer(
+                "❌ Неверный формат. Используйте <b>ДД.ММ.ГГГГ</b> или /today",
+                parse_mode="HTML"
+            )
+            return
+
+    data = await state.get_data()
+    author = data.get("author_name", "Клиент")
+    service = data.get("service_name", "Услуга")
+    rating = data.get("rating", 5)
+    rtext = data.get("review_text", "")
+
+    review_id = await run_db(
+        add_review,
+        author_name=author,
+        service_name=service,
+        rating=rating,
+        review_text=rtext,
+        display_date=display_date,
+        is_fake=1,
+        order_id=None,
+        created_by=message.from_user.id
+    )
+    await run_db(add_admin_log, message.from_user.id, "create_fake_review",
+                 f"Создал фейковый отзыв #{review_id}: {author} — {service} ({rating}★)")
+
+    stars = "⭐" * rating + "☆" * (5 - rating)
+    await message.answer(
+        f"✅ <b>Фейковый отзыв создан!</b>\n\n"
+        f"🆔 #{review_id}\n"
+        f"👤 {escape_html(author)}\n"
+        f"📋 {escape_html(service)}\n"
+        f"{stars} {rating}/5\n"
+        f"💬 {escape_html(rtext or 'Без текста')}\n"
+        f"📅 {display_date}\n\n"
+        f"Отзыв сразу виден пользователям.",
+        reply_markup=admin_menu_keyboard(message.from_user.id),
+        parse_mode="HTML"
+    )
+    await state.clear()
+
+
+# ===================== АДМИН: ПРИКРЕПИТЬ ФАЙЛ =====================
 # ===================== АДМИН: ПРИКРЕПИТЬ ФАЙЛ =====================
 @dp.callback_query(F.data.startswith("attach_file_"))
 async def cb_attach_file_start(callback: CallbackQuery, state: FSMContext):
@@ -4092,7 +4429,7 @@ async def cb_review_process(message: Message, state: FSMContext):
     if message.text and message.text == "/skip":
         review_text = ""
     else:
-        review_text = message.text
+        review_text = message.text or ""
     data = await state.get_data()
     order_id = data.get("order_id")
     rating = data.get("rating")
@@ -4103,6 +4440,24 @@ async def cb_review_process(message: Message, state: FSMContext):
     await run_db(update_order_review, order_id, rating, review_text)
     order = await run_db(get_order, order_id)
     order_code = order[9] if order else f"#{order_id}"
+    service_name = order[2] if order else "Услуга"
+    # Имя автора из профиля
+    user = await run_db(get_user, message.from_user.id)
+    author_name = (user[2] if user and user[2] else None) or message.from_user.first_name or "Клиент"
+    if user and user[1]:
+        author_name = f"@{user[1]}"
+    # Дублируем в единую таблицу отзывов
+    await run_db(
+        add_review,
+        author_name=author_name,
+        service_name=service_name,
+        rating=rating,
+        review_text=review_text,
+        display_date=datetime.now().strftime("%d.%m.%Y"),
+        is_fake=0,
+        order_id=order_id,
+        created_by=None
+    )
     await run_db(add_user_log, message.from_user.id, "review", f"Оставил отзыв на заказ {order_code}: {rating}/5")
     await message.answer(
         f"✅ <b>Спасибо за ваш отзыв!</b>\n\n⭐ Оценка: <b>{rating}/5</b>\n📝 Отзыв: {escape_html(review_text or 'Без текста')}\n\nМы ценим ваше мнение!",
