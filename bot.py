@@ -426,16 +426,27 @@ def remove_admin(user_id: int):
 
 
 def is_admin_db(user_id: int) -> bool:
-    return user_id in MAIN_ADMINS
+    """Проверка админа: сначала список MAIN_ADMINS, потом таблица admins"""
+    if user_id in MAIN_ADMINS:
+        return True
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM admins WHERE user_id = ? AND is_active = 1", (user_id,))
+    exists = cur.fetchone() is not None
+    conn.close()
+    return exists
 
 
 def is_super_admin(user_id: int) -> bool:
+    """Супер-админ — только те, кто в MAIN_ADMINS"""
     return user_id in MAIN_ADMINS
 
 
 def get_admin_role(user_id: int) -> str:
     if user_id in MAIN_ADMINS:
         return 'super_admin'
+    if is_admin_db(user_id):
+        return 'admin'
     return None
 
 
@@ -1524,6 +1535,16 @@ class ChatState(StatesGroup):
     sending = State()
 
 
+class AdminAddState(StatesGroup):
+    waiting_for_admin_id = State()
+
+
+class AdminPromoManageState(StatesGroup):
+    waiting_for_activate = State()
+    waiting_for_deactivate = State()
+    waiting_for_delete = State()
+
+
 # ===================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====================
 async def update_message(callback: CallbackQuery, text: str, reply_markup=None, parse_mode="HTML"):
     try:
@@ -2189,11 +2210,11 @@ async def cb_admin_add(callback: CallbackQuery, state: FSMContext):
 ℹ️ Пользователь должен хотя бы раз написать боту /start
 """
     await callback.message.edit_text(text, reply_markup=back_to_admin_keyboard(), parse_mode="HTML")
-    await state.set_state("waiting_for_admin_id")
+    await state.set_state(AdminAddState.waiting_for_admin_id)
     await callback.answer()
 
 
-@dp.message(StateFilter("waiting_for_admin_id"))
+@dp.message(AdminAddState.waiting_for_admin_id)
 async def process_admin_add(message: Message, state: FSMContext):
     if not is_super_admin(message.from_user.id):
         await message.answer("⛔ Нет доступа.", parse_mode="HTML")
@@ -2844,11 +2865,11 @@ async def cb_promotion_activate(callback: CallbackQuery, state: FSMContext):
         reply_markup=back_to_admin_keyboard(),
         parse_mode="HTML"
     )
-    await state.set_state("waiting_for_promo_activate")
+    await state.set_state(AdminPromoManageState.waiting_for_activate)
     await callback.answer()
 
 
-@dp.message(StateFilter("waiting_for_promo_activate"))
+@dp.message(AdminPromoManageState.waiting_for_activate)
 async def process_promotion_activate_id(message: Message, state: FSMContext):
     if not is_super_admin(message.from_user.id):
         await message.answer("⛔ Нет доступа.", parse_mode="HTML")
@@ -2887,11 +2908,11 @@ async def cb_promotion_deactivate(callback: CallbackQuery, state: FSMContext):
         reply_markup=back_to_admin_keyboard(),
         parse_mode="HTML"
     )
-    await state.set_state("waiting_for_promo_deactivate")
+    await state.set_state(AdminPromoManageState.waiting_for_deactivate)
     await callback.answer()
 
 
-@dp.message(StateFilter("waiting_for_promo_deactivate"))
+@dp.message(AdminPromoManageState.waiting_for_deactivate)
 async def process_promotion_deactivate_id(message: Message, state: FSMContext):
     if not is_super_admin(message.from_user.id):
         await message.answer("⛔ Нет доступа.", parse_mode="HTML")
@@ -2931,11 +2952,11 @@ async def cb_promotion_delete(callback: CallbackQuery, state: FSMContext):
         reply_markup=back_to_admin_keyboard(),
         parse_mode="HTML"
     )
-    await state.set_state("waiting_for_promo_delete")
+    await state.set_state(AdminPromoManageState.waiting_for_delete)
     await callback.answer()
 
 
-@dp.message(StateFilter("waiting_for_promo_delete"))
+@dp.message(AdminPromoManageState.waiting_for_delete)
 async def process_promotion_delete_id(message: Message, state: FSMContext):
     if not is_super_admin(message.from_user.id):
         await message.answer("⛔ Нет доступа.", parse_mode="HTML")
@@ -3451,7 +3472,11 @@ async def cb_set_price_start(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
-    order_id = int(callback.data.split("_")[2])
+    try:
+        order_id = int(callback.data.split("_")[2])
+    except (ValueError, IndexError):
+        await callback.answer("❌ Ошибка: неверный формат данных", show_alert=True)
+        return
     order = await run_db(get_order, order_id)
     if not order:
         await callback.answer("❌ Заказ не найден", show_alert=True)
@@ -3827,7 +3852,7 @@ async def cb_complete_work(callback: CallbackQuery):
     await callback.answer("✅ Работа завершена!", show_alert=True)
 
     await show_order_detail(callback.message, order_id, is_callback=True)
-    
+
 # ===================== АДМИН: ОТЗЫВЫ =====================
 @dp.callback_query(F.data == "admin_reviews")
 async def cb_admin_reviews(callback: CallbackQuery):
@@ -4769,128 +4794,33 @@ async def cb_delete_order(callback: CallbackQuery):
 
     # Возвращаемся к списку заказов
     await cb_admin_orders(callback)
-@dp.callback_query(F.data.startswith("set_price_"))
-async def cb_set_price_start(callback: CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("⛔ Нет доступа", show_alert=True)
-        return
-
-    try:
-        order_id = int(callback.data.split("_")[2])
-    except (ValueError, IndexError):
-        await callback.answer("❌ Ошибка: неверный формат данных", show_alert=True)
-        return
-
-    order = await run_db(get_order, order_id)
-    if not order:
-        await callback.answer("❌ Заказ не найден", show_alert=True)
-        return
-
-    await state.update_data(order_id=order_id)
-    await callback.message.edit_text(
-        f"💰 <b>Назначение цены для заказа {order[9] or f'#{order_id}'}</b>\n\n"
-        f"Текущая цена: {order[3]} руб.\n\n"
-        f"Введите новую цену (только число):",
-        reply_markup=back_to_admin_keyboard(),
-        parse_mode="HTML"
-    )
-    await state.set_state(AdminSetPriceState.waiting_for_price)
-    await callback.answer()
-
-
-@dp.message(AdminSetPriceState.waiting_for_price)
-async def cb_set_price_process(message: Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        await message.answer("⛔ Нет доступа.", parse_mode="HTML")
-        await state.clear()
-        return
-
-    data = await state.get_data()
-    order_id = data.get("order_id")
-
-    if not order_id:
-        await message.answer("❌ Ошибка: заказ не найден.", parse_mode="HTML")
-        await state.clear()
-        return
-
-    try:
-        new_price = int(message.text.strip())
-    except ValueError:
-        await message.answer("❌ Введите число. Например: 5000", parse_mode="HTML")
-        return
-
-    if new_price <= 0:
-        await message.answer("❌ Цена должна быть больше 0.", parse_mode="HTML")
-        return
-
-    order = await run_db(get_order, order_id)
-    order_code = order[9] if order else f"#{order_id}"
-
-    await run_db(update_order_price, order_id, new_price, "")
-    await run_db(add_admin_log, message.from_user.id, "set_price",
-                 f"Назначил цену {new_price} руб. для заказа {order_code}")
-
-    await message.answer(
-        f"✅ Цена для заказа <b>{escape_html(order_code)}</b> обновлена на <b>{new_price} руб.</b>\n\n"
-        f"Теперь вы можете подтвердить оплату!",
-        reply_markup=admin_menu_keyboard(message.from_user.id),
-        parse_mode="HTML"
-    )
-    await state.clear()
 # ===================== ГЛОБАЛЬНЫЙ ОБРАБОТЧИК СООБЩЕНИЙ =====================
 # ВАЖНО: Этот обработчик должен быть ПОСЛЕ ВСЕХ обработчиков состояний!
 @dp.message()
 async def handle_all_messages(message: Message, state: FSMContext):
+    """Глобальный обработчик текстовых сообщений (чат с поддержкой).
+    Срабатывает только если нет активного FSM-состояния.
+    """
     user_id = message.from_user.id
 
-    # Получаем текущее состояние
+    # Если пользователь в любом FSM-состоянии — не трогаем
     current_state = await state.get_state()
-
-    # ===== СПИСОК СОСТОЯНИЙ, КОТОРЫЕ НУЖНО ПРОПУСТИТЬ =====
-    states_to_skip = [
-        "ReviewState:waiting_for_review",
-        "AdminSetPriceState:waiting_for_price",
-        "AdminPromocodeCreateState:waiting_for_discount",
-        "AdminPromocodeCreateState:waiting_for_valid_until",
-        "AdminPromocodeCreateState:waiting_for_max_uses",
-        "AdminServiceEditState:waiting_for_name",
-        "AdminServiceEditState:waiting_for_description",
-        "AdminServiceEditState:waiting_for_price",
-        "ChatState:sending",
-        "SupportState:waiting_for_message",
-        "AdminBroadcastState:waiting_for_message",
-        "AdminDeleteOldState:waiting_for_days",
-        "AttachFileState:waiting_for_file",
-        "AdminServiceAddState:waiting_for_name",
-        "AdminServiceAddState:waiting_for_description",
-        "AdminServiceAddState:waiting_for_price",
-        "AdminPollCreateState:waiting_for_question",
-        "AdminPollCreateState:waiting_for_options",
-        "AdminPollCreateState:waiting_for_expiry",
-        "UserPromocodeState:waiting_for_code",
-        "UserBirthdayState:waiting_for_birthday",
-        "AdminPromotionCreateState:waiting_for_name",
-        "AdminPromotionCreateState:waiting_for_service",
-        "AdminPromotionCreateState:waiting_for_description",
-        "AdminPromotionCreateState:waiting_for_discount",
-        "AdminPromotionCreateState:waiting_for_valid_until"
-    ]
-
-    # ===== ЕСЛИ ЕСТЬ АКТИВНОЕ СОСТОЯНИЕ — ВЫХОДИМ =====
-    if current_state in states_to_skip or current_state is not None:
+    if current_state is not None:
         logging.debug(f"Состояние {current_state} активно, пропускаем глобальный обработчик")
         return
 
+    # Админы не должны попадать в клиентский чат через этот хендлер
     if await run_db(is_admin_db, user_id):
         return
 
+    # Команды обрабатываются своими хендлерами
     if message.text and message.text.startswith("/"):
         return
 
     if not message.text:
         await message.answer(
             "📎 Я принимаю только текстовые сообщения.\n"
-            "Для отправки файлов используйте кнопку '📎 Прикрепить файл' в админ-панели.",
+            "Для отправки файлов используйте кнопку в админ-панели.",
             parse_mode="HTML"
         )
         return
