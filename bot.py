@@ -16,7 +16,7 @@ Sopranidi Corporation Telegram Bot (aiogram 3 + SQLite)
 - Создать .env с BOT_TOKEN=... и при необходимости ADMINS=123,456
 - Положить logo.jpg и папку examples/ рядом с ботом (опционально)
 """
-
+import sys
 import asyncio
 import logging
 import sqlite3
@@ -5207,7 +5207,6 @@ async def handle_all_messages(message: Message, state: FSMContext):
         parse_mode="HTML"
     )
 
-# ===================== ЗАПУСК БОТА =====================
 async def main():
     init_db()
     logging.info("🚀 Бот Sopranidi Corp. запущен!")
@@ -5215,10 +5214,20 @@ async def main():
     logging.info(f"👤 CEO: {CEO_USERNAME}")
     logging.info(f"👥 Администраторы: {len(ADMINS)}")
 
+    # ✅ Фоновые задачи ЗАПУСКАЕМ ПЕРЕД polling
     asyncio.create_task(birthday_checker_loop())
     asyncio.create_task(poll_closer_loop())
 
-    await dp.start_polling(bot)
+    # ✅ Бесконечный цикл с перезапуском при ошибке
+    while True:
+        try:
+            logging.info("▶️ Запуск polling...")
+            await dp.start_polling(bot, polling_timeout=10)
+        except Exception as e:
+            logging.error(f"❌ Бот упал с ошибкой: {e}")
+            logging.info("🔄 Перезапуск через 5 секунд...")
+            await asyncio.sleep(5)
+            os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
 if __name__ == "__main__":
