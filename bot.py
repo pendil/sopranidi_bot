@@ -5214,21 +5214,14 @@ async def main():
     logging.info(f"👤 CEO: {CEO_USERNAME}")
     logging.info(f"👥 Администраторы: {len(ADMINS)}")
 
-    # ✅ Фоновые задачи ЗАПУСКАЕМ ПЕРЕД polling
     asyncio.create_task(birthday_checker_loop())
     asyncio.create_task(poll_closer_loop())
 
-    # ✅ Бесконечный цикл с перезапуском при ошибке
     while True:
         try:
             logging.info("▶️ Запуск polling...")
-            await dp.start_polling(bot, polling_timeout=10)
+            await dp.start_polling(bot, polling_timeout=60)
         except Exception as e:
-            logging.error(f"❌ Бот упал с ошибкой: {e}")
-            logging.info("🔄 Перезапуск через 5 секунд...")
-            await asyncio.sleep(5)
-            os.execv(sys.executable, [sys.executable] + sys.argv)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+            logging.error(f"❌ Ошибка polling: {e}")
+            logging.info("🔄 Перезапуск через 10 секунд...")
+            await asyncio.sleep(10)
