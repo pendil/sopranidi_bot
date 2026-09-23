@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 
 import sys
-print("DEBUG: Файл начал выполняться", flush=True)
 import asyncio
 import logging
 import sqlite3
@@ -5192,12 +5191,9 @@ async def handle_all_messages(message: Message, state: FSMContext):
         parse_mode="HTML"
     )
 
-print("DEBUG: Дошёл до main()", flush=True)
 
 async def main():
-    print("DEBUG: main() запустился", flush=True)
     init_db()
-    print("DEBUG: БД инициализирована", flush=True)
     logging.info("🚀 Бот Sopranidi Corp. запущен!")
     logging.info(f"📌 Диспетчер: {DISPATCHER_USERNAME}")
     logging.info(f"👤 CEO: {CEO_USERNAME}")
