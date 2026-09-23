@@ -5213,13 +5213,11 @@ async def main():
     logging.info(f"📌 Диспетчер: {DISPATCHER_USERNAME}")
     logging.info(f"👤 CEO: {CEO_USERNAME}")
     logging.info(f"👥 Администраторы: {len(ADMINS)}")
-    # ✅ УДАЛЯЕМ ВЕБХУК ПЕРЕД ЗАПУСКОМ POLLING
-    await bot.delete_webhook(drop_pending_updates=True)
 
     asyncio.create_task(birthday_checker_loop())
     asyncio.create_task(poll_closer_loop())
 
-    await dp.start_polling(bot, polling_timeout=60)
+   
 
     while True:
         try:
