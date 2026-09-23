@@ -1,22 +1,7 @@
 # -*- coding: utf-8 -*-
-"""
-Sopranidi Corporation Telegram Bot (aiogram 3 + SQLite)
 
-ИСПРАВЛЕНИЯ В ЭТОЙ ВЕРСИИ:
-1. Удалены дублирующиеся обработчики set_price (критический баг).
-2. is_admin_db теперь проверяет и MAIN_ADMINS, и таблицу admins в БД.
-3. Строковые FSM-состояния заменены на нормальные StatesGroup
-   (AdminAddState, AdminPromoManageState).
-4. Упрощён и сделан надёжнее глобальный обработчик сообщений.
-5. Добавлена защита от некорректного order_id в set_price.
-6. Небольшие улучшения читаемости и стабильности.
-
-Что нужно сделать перед запуском:
-- Установить зависимости: aiogram, python-dotenv, openpyxl (опционально)
-- Создать .env с BOT_TOKEN=... и при необходимости ADMINS=123,456
-- Положить logo.jpg и папку examples/ рядом с ботом (опционально)
-"""
 import sys
+print("DEBUG: Файл начал выполняться", flush=True)
 import asyncio
 import logging
 import sqlite3
@@ -5207,8 +5192,12 @@ async def handle_all_messages(message: Message, state: FSMContext):
         parse_mode="HTML"
     )
 
+print("DEBUG: Дошёл до main()", flush=True)
+
 async def main():
+    print("DEBUG: main() запустился", flush=True)
     init_db()
+    print("DEBUG: БД инициализирована", flush=True)
     logging.info("🚀 Бот Sopranidi Corp. запущен!")
     logging.info(f"📌 Диспетчер: {DISPATCHER_USERNAME}")
     logging.info(f"👤 CEO: {CEO_USERNAME}")
@@ -5217,7 +5206,7 @@ async def main():
     asyncio.create_task(birthday_checker_loop())
     asyncio.create_task(poll_closer_loop())
 
-   
+
 
     while True:
         try:
